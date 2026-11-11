@@ -188,15 +188,15 @@ fn mid_merge_lists_every_hunk_json() {
     let files = report["files"].as_array().expect("files array");
     let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
     assert!(
-        paths.iter().any(|p| *p == "src/app.rs"),
+        paths.contains(&"src/app.rs"),
         "missing src/app.rs in {paths:?}"
     );
     assert!(
-        paths.iter().any(|p| *p == "notes/my file.txt"),
+        paths.contains(&"notes/my file.txt"),
         "missing spaced path in {paths:?}"
     );
     assert!(
-        paths.iter().any(|p| *p == "assets/logo.bin"),
+        paths.contains(&"assets/logo.bin"),
         "missing binary in {paths:?}"
     );
 
