@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -18,7 +19,9 @@ impl GitRepo {
         if root.as_os_str().is_empty() {
             return Err(TruceError::BareRepository);
         }
-        Ok(Self { root })
+        Ok(Self {
+            root: canonicalize_dir(&root),
+        })
     }
 
     /// True when a merge, rebase, cherry-pick, or revert is in progress.
@@ -207,22 +210,34 @@ pub fn filter_paths(
 }
 
 fn normalize_filter(repo_root: &Path, cwd: &Path, filter: &Path) -> Result<PathBuf> {
+    // Canonicalize so Windows 8.3 vs long paths, and git's `C:/...` vs
+    // `std::env::current_dir()` `C:\...`, still strip_prefix.
+    let root = canonicalize_dir(repo_root);
+    let cwd = canonicalize_dir(cwd);
+
     let abs = if filter.is_absolute() {
         filter.to_path_buf()
     } else {
         cwd.join(filter)
     };
 
-    // Do not require the path to exist: a deleted-ours conflict may have no
-    // working-tree file. Walk components to resolve `..` without canonicalize.
-    let abs = normalize_logical(&abs);
-    let root = normalize_logical(repo_root);
+    // Do not require the filter to exist: a deleted-ours conflict may have no
+    // working-tree file. Canonicalize when we can; otherwise walk `..`.
+    let abs = if abs.exists() {
+        fs::canonicalize(&abs).unwrap_or_else(|_| normalize_logical(&abs))
+    } else {
+        normalize_logical(&abs)
+    };
 
     abs.strip_prefix(&root)
         .map(Path::to_path_buf)
         .map_err(|_| TruceError::PathOutsideRepo {
             path: filter.to_path_buf(),
         })
+}
+
+fn canonicalize_dir(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| normalize_logical(path))
 }
 
 fn normalize_logical(path: &Path) -> PathBuf {
@@ -271,5 +286,16 @@ mod tests {
             got,
             vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
         );
+    }
+
+    #[test]
+    fn filter_exact_file_after_canonicalize() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/app.rs"), "x\n").unwrap();
+        let unmerged = vec![PathBuf::from("src/app.rs"), PathBuf::from("src/other.rs")];
+        let got = filter_paths(root, root, unmerged, &[PathBuf::from("src/app.rs")]).unwrap();
+        assert_eq!(got, vec![PathBuf::from("src/app.rs")]);
     }
 }
