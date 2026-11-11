@@ -220,7 +220,7 @@ A composite action lives at the repository root (`action.yml`). Copy
 | Input | Default | Notes |
 | --- | --- | --- |
 | `openrouter-api-key` | required | Pass `secrets.OPENROUTER_API_KEY`. Never echoed. |
-| `mode` | `report` | `report` previews; `commit` applies, stages, commits, and pushes a `truce/resolve-*` branch. |
+| `mode` | `report` | `report` previews; `commit` applies, stages, commits, and pushes a `truce/resolve-*` branch **only when every conflict resolved** (truce exit 0). A clean merge exits 0 without pushing. Unresolved hunks skip commit/push and keep truce's exit code. |
 | `model` | config / `openai/gpt-4o-mini` | OpenRouter model id. |
 | `min-confidence` | `0.7` | Reject below this confidence. |
 | `target-branch` | `github.base_ref` | Branch merged into the PR head before Truce runs. |

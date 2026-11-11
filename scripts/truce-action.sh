@@ -16,6 +16,18 @@ if [[ "${OPENROUTER_API_KEY:-}" == *[[:space:]]* ]]; then
   exit 2
 fi
 
+# A GitHub runner has no commit identity. Set it before any merge/commit
+# so a clean merge is not rejected, then hidden by `|| true`.
+git config user.name "${GIT_AUTHOR_NAME:-github-actions[bot]}"
+git config user.email "${GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+
+note() {
+  echo "$1"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '%s\n' "$1" >> "${GITHUB_STEP_SUMMARY}"
+  fi
+}
+
 if [[ "${TRUCE_SKIP_FETCH:-}" != "1" ]]; then
   if [[ -z "$target" ]]; then
     target="${GITHUB_BASE_REF:-main}"
@@ -31,7 +43,29 @@ if [[ "${TRUCE_SKIP_MERGE:-}" != "1" ]]; then
     TRUCE_MERGE_REF="origin/${target}"
   fi
   echo "Merging ${TRUCE_MERGE_REF} into $(git rev-parse --abbrev-ref HEAD)"
-  git merge --no-edit --no-stat "${TRUCE_MERGE_REF}" || true
+  set +e
+  merge_out="$(git merge --no-edit --no-stat "${TRUCE_MERGE_REF}" 2>&1)"
+  merge_code=$?
+  set -e
+  if [[ -n "$merge_out" ]]; then
+    printf '%s\n' "$merge_out"
+  fi
+
+  if [[ "$merge_code" -eq 0 ]]; then
+    note "Merged cleanly; nothing to resolve"
+    exit 0
+  fi
+
+  unmerged="$(git ls-files -u)"
+  if [[ -n "$unmerged" ]]; then
+    echo "Merge produced conflicts; continuing with truce"
+  else
+    echo "error: git merge failed without conflicts (exit ${merge_code})" >&2
+    if [[ -n "$merge_out" ]]; then
+      printf '%s\n' "$merge_out" >&2
+    fi
+    exit 2
+  fi
 fi
 
 args=(--ci --no-color)
@@ -56,9 +90,13 @@ code=$?
 set -e
 
 if [[ "$mode" == "commit" ]]; then
-  if [[ -n "$(git diff --cached --name-only)" ]]; then
-    git config user.name "${GIT_AUTHOR_NAME:-github-actions[bot]}"
-    git config user.email "${GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+  unmerged="$(git ls-files -u)"
+  if [[ "$code" -ne 0 || -n "$unmerged" ]]; then
+    note "Skipping commit and push: truce exited ${code}; unresolved conflicts remain."
+    if [[ "$code" -eq 0 ]]; then
+      code=1
+    fi
+  elif [[ -n "$(git diff --cached --name-only)" ]]; then
     git commit -m "truce: resolve merge conflicts"
     if [[ "${TRUCE_SKIP_PUSH:-}" != "1" ]]; then
       branch="truce/resolve-${GITHUB_HEAD_REF:-${GITHUB_SHA:-local}}"
@@ -66,6 +104,8 @@ if [[ "$mode" == "commit" ]]; then
       git checkout -B "$branch"
       git push -u origin "HEAD:refs/heads/${branch}"
       echo "Pushed resolutions to ${branch}"
+    else
+      echo "Committed resolutions (push skipped)"
     fi
   else
     echo "No staged resolutions to commit"

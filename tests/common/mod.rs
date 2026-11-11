@@ -138,6 +138,28 @@ pub fn mid_merge_repo() -> TempDir {
     dir
 }
 
+/// Two branches that merge cleanly, currently on `feature`.
+pub fn two_branch_clean_repo() -> TempDir {
+    let dir = init_repo();
+    let root = dir.path();
+    write(root, "base.txt", "base\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "base"]);
+
+    git(root, &["checkout", "-b", "feature"]);
+    write(root, "feature.txt", "feature\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "feature"]);
+
+    git(root, &["checkout", "main"]);
+    write(root, "main.txt", "main\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "main"]);
+
+    git(root, &["checkout", "feature"]);
+    dir
+}
+
 /// Two branches that conflict, currently on `feature` with a clean tree.
 /// The action script fetches/merges `main` (or `TRUCE_MERGE_REF`) itself.
 pub fn two_branch_repo() -> TempDir {
