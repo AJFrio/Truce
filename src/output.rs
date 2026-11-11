@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
 use crate::parse::{Hunk, LineEnding};
-use crate::resolve::Resolution;
+use crate::resolve::{HunkOutcome, Resolution};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -55,13 +55,15 @@ pub struct FileReport {
     pub hunks: Vec<HunkReport>,
 }
 
-/// A hunk plus an optional resolution (always null in ENG-55).
+/// A hunk plus an optional resolution or rejection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HunkReport {
     #[serde(flatten)]
     pub hunk: Hunk,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,7 @@ pub struct Summary {
     pub unresolved_hunks: usize,
     pub parse_errors: usize,
     pub files_written: usize,
+    pub files_staged: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +85,8 @@ pub struct Report {
     pub repo_root: String,
     pub merge_in_progress: bool,
     pub dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub files: Vec<FileReport>,
     pub summary: Summary,
 }
@@ -96,7 +101,7 @@ pub struct FileScan {
     pub lines: Vec<String>,
     pub hunks: Vec<Hunk>,
     pub error: Option<String>,
-    pub resolutions: Vec<Option<Resolution>>,
+    pub outcomes: Vec<HunkOutcome>,
 }
 
 impl FileScan {
@@ -110,10 +115,11 @@ impl FileScan {
             hunks: self
                 .hunks
                 .iter()
-                .zip(self.resolutions.iter())
-                .map(|(hunk, resolution)| HunkReport {
+                .zip(self.outcomes.iter())
+                .map(|(hunk, outcome)| HunkReport {
                     hunk: hunk.clone(),
-                    resolution: resolution.clone(),
+                    resolution: outcome.resolution().cloned(),
+                    rejection: outcome.rejection().map(str::to_string),
                 })
                 .collect(),
         }
@@ -134,8 +140,10 @@ impl Report {
         repo_root: &std::path::Path,
         merge_in_progress: bool,
         dry_run: bool,
+        model: Option<String>,
         scans: &[FileScan],
         files_written: usize,
+        files_staged: usize,
     ) -> Self {
         let files: Vec<FileReport> = scans.iter().map(FileScan::to_report).collect();
         let conflicted_files = files
@@ -163,6 +171,7 @@ impl Report {
             repo_root: repo_root.display().to_string(),
             merge_in_progress,
             dry_run,
+            model,
             files,
             summary: Summary {
                 conflicted_files,
@@ -172,6 +181,7 @@ impl Report {
                 unresolved_hunks,
                 parse_errors,
                 files_written,
+                files_staged,
             },
         }
     }
@@ -246,6 +256,14 @@ impl Palette {
 
     fn error(&self, text: &str) -> String {
         self.paint("1;31", text)
+    }
+
+    fn resolved(&self, text: &str) -> String {
+        self.paint("1;32", text)
+    }
+
+    fn rejected(&self, text: &str) -> String {
+        self.paint("1;33", text)
     }
 }
 
@@ -333,30 +351,40 @@ fn write_human(out: &mut dyn Write, report: &Report, color: bool) -> io::Result<
                 "  hunk {}  lines {}–{}  ({style})",
                 hunk.id, hunk.start_line, hunk.end_line
             )?;
-            writeln!(
-                out,
-                "    {}  {}",
-                p.ours("OURS"),
-                label_or_empty(&hunk.ours_label)
-            )?;
-            write_block(out, "    ", &hunk.ours)?;
-            if let (Some(label), Some(lines)) = (&hunk.base_label, &hunk.base) {
-                writeln!(out, "    {}  {}", p.base("BASE"), label_or_empty(label))?;
-                write_block(out, "    ", lines)?;
-            }
-            writeln!(
-                out,
-                "    {}  {}",
-                p.theirs("THEIRS"),
-                label_or_empty(&hunk.theirs_label)
-            )?;
-            write_block(out, "    ", &hunk.theirs)?;
             if let Some(res) = &h.resolution {
                 writeln!(
                     out,
-                    "    RESOLVED  choice={:?}  confidence={:.2}",
-                    res.choice, res.confidence
+                    "    {}  choice={}  confidence={:.2}",
+                    p.resolved("RESOLVED"),
+                    res.choice,
+                    res.confidence
                 )?;
+                if !res.rationale.trim().is_empty() {
+                    writeln!(out, "    rationale: {}", res.rationale.trim())?;
+                }
+                write_diff(out, &p, hunk, &res.text)?;
+            } else {
+                writeln!(
+                    out,
+                    "    {}  {}",
+                    p.ours("OURS"),
+                    label_or_empty(&hunk.ours_label)
+                )?;
+                write_block(out, "    ", &hunk.ours)?;
+                if let (Some(label), Some(lines)) = (&hunk.base_label, &hunk.base) {
+                    writeln!(out, "    {}  {}", p.base("BASE"), label_or_empty(label))?;
+                    write_block(out, "    ", lines)?;
+                }
+                writeln!(
+                    out,
+                    "    {}  {}",
+                    p.theirs("THEIRS"),
+                    label_or_empty(&hunk.theirs_label)
+                )?;
+                write_block(out, "    ", &hunk.theirs)?;
+                if let Some(reason) = &h.rejection {
+                    writeln!(out, "    {}  {reason}", p.rejected("REJECTED"))?;
+                }
             }
         }
         writeln!(out)?;
@@ -371,17 +399,68 @@ fn write_human(out: &mut dyn Write, report: &Report, color: bool) -> io::Result<
     } else if s.unresolved_hunks > 0 || s.skipped_files > 0 {
         writeln!(
             out,
-            "{} hunk(s) unresolved, {} file(s) skipped. Dry-run is the default; pass --apply to write accepted resolutions.",
+            "{} hunk(s) unresolved, {} file(s) skipped. Dry-run is the default; pass --apply to write files whose hunks all resolved.",
             s.unresolved_hunks, s.skipped_files
         )?;
     } else {
         writeln!(out, "No unresolved conflicts.")?;
     }
 
+    if report.dry_run && s.resolved_hunks > 0 {
+        writeln!(
+            out,
+            "Dry-run preview only; pass --apply to write fully resolved files."
+        )?;
+    }
     if s.files_written > 0 {
         writeln!(out, "Wrote {} file(s).", s.files_written)?;
     }
+    if s.files_staged > 0 {
+        writeln!(out, "Staged {} file(s).", s.files_staged)?;
+    }
 
+    Ok(())
+}
+
+fn write_diff(out: &mut dyn Write, p: &Palette, hunk: &Hunk, resolved: &str) -> io::Result<()> {
+    let resolved_lines: Vec<String> = {
+        let t = resolved.replace("\r\n", "\n");
+        let trailing = t.ends_with('\n');
+        let mut lines: Vec<String> = t.split('\n').map(str::to_string).collect();
+        if trailing {
+            lines.pop();
+        }
+        if lines.len() == 1 && lines[0].is_empty() && resolved.is_empty() {
+            lines.clear();
+        }
+        lines
+    };
+    let same_ours = resolved_lines == hunk.ours;
+    let same_theirs = resolved_lines == hunk.theirs;
+    if same_ours {
+        writeln!(out, "    (identical to OURS)")?;
+        return Ok(());
+    }
+    if same_theirs {
+        writeln!(out, "    (identical to THEIRS)")?;
+        return Ok(());
+    }
+    writeln!(out, "    --- {}", p.ours("OURS"))?;
+    if hunk.ours.is_empty() {
+        writeln!(out, "    - (empty)")?;
+    } else {
+        for line in &hunk.ours {
+            writeln!(out, "    - {line}")?;
+        }
+    }
+    writeln!(out, "    +++ {}", p.resolved("RESOLVED"))?;
+    if resolved_lines.is_empty() {
+        writeln!(out, "    + (empty)")?;
+    } else {
+        for line in &resolved_lines {
+            writeln!(out, "    + {line}")?;
+        }
+    }
     Ok(())
 }
 
@@ -428,7 +507,8 @@ mod tests {
 
     #[test]
     fn exit_zero_when_empty() {
-        let report = Report::from_scans(std::path::Path::new("/repo"), false, true, &[], 0);
+        let report =
+            Report::from_scans(std::path::Path::new("/repo"), false, true, None, &[], 0, 0);
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.schema_version, 1);
     }
@@ -442,11 +522,19 @@ mod tests {
             line_ending: parsed.line_ending,
             trailing_newline: parsed.trailing_newline,
             lines: parsed.lines,
-            resolutions: vec![None],
+            outcomes: vec![HunkOutcome::Unresolved],
             hunks: parsed.hunks,
             error: None,
         };
-        let report = Report::from_scans(std::path::Path::new("/repo"), true, true, &[scan], 0);
+        let report = Report::from_scans(
+            std::path::Path::new("/repo"),
+            true,
+            true,
+            None,
+            &[scan],
+            0,
+            0,
+        );
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.summary.hunks, 1);
     }
@@ -461,11 +549,19 @@ mod tests {
             line_ending: parsed.line_ending,
             trailing_newline: parsed.trailing_newline,
             lines: parsed.lines,
-            resolutions: vec![None],
+            outcomes: vec![HunkOutcome::Unresolved],
             hunks: parsed.hunks,
             error: None,
         };
-        let report = Report::from_scans(std::path::Path::new("/repo"), true, true, &[scan], 0);
+        let report = Report::from_scans(
+            std::path::Path::new("/repo"),
+            true,
+            true,
+            None,
+            &[scan],
+            0,
+            0,
+        );
         let json = serde_json::to_string_pretty(&report).unwrap();
         assert!(json.contains("\"schema_version\": 1"));
         assert!(json.contains("\"path\": \"src/app.rs\""));

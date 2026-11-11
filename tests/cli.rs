@@ -1,136 +1,14 @@
 //! CLI integration tests. These shell out to a real `git` and the `truce` binary.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-use assert_cmd::Command as Truce;
+use common::{git, git_allow_fail, init_repo, mid_merge_repo, truce, write};
 use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
-
-fn git(dir: &Path, args: &[&str]) -> Output {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Truce Test")
-        .env("GIT_AUTHOR_EMAIL", "truce@example.com")
-        .env("GIT_COMMITTER_NAME", "Truce Test")
-        .env("GIT_COMMITTER_EMAIL", "truce@example.com")
-        .output()
-        .unwrap_or_else(|err| panic!("git {:?} failed to spawn: {err}", args));
-    if !output.status.success() {
-        panic!(
-            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    output
-}
-
-fn git_allow_fail(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Truce Test")
-        .env("GIT_AUTHOR_EMAIL", "truce@example.com")
-        .env("GIT_COMMITTER_NAME", "Truce Test")
-        .env("GIT_COMMITTER_EMAIL", "truce@example.com")
-        .output()
-        .unwrap_or_else(|err| panic!("git {:?} failed to spawn: {err}", args))
-}
-
-fn init_repo() -> TempDir {
-    let dir = TempDir::new().unwrap();
-    let init = git_allow_fail(dir.path(), &["init", "--initial-branch=main"]);
-    if !init.status.success() {
-        git(dir.path(), &["init"]);
-        let _ = git_allow_fail(dir.path(), &["checkout", "-b", "main"]);
-    }
-    git(dir.path(), &["config", "user.name", "Truce Test"]);
-    git(dir.path(), &["config", "user.email", "truce@example.com"]);
-    git(dir.path(), &["config", "core.autocrlf", "false"]);
-    git(dir.path(), &["config", "commit.gpgsign", "false"]);
-    git(dir.path(), &["config", "advice.detachedHead", "false"]);
-    dir
-}
-
-fn write(dir: &Path, rel: &str, contents: &str) {
-    let path = dir.join(rel);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, contents).unwrap();
-}
-
-fn truce(dir: &Path) -> Truce {
-    let mut cmd = Truce::cargo_bin("truce").unwrap();
-    cmd.current_dir(dir)
-        .env("NO_COLOR", "1")
-        .env("TERM", "dumb");
-    cmd
-}
-
-/// Two text files (one with a space in the name) plus a binary, all conflicted.
-fn mid_merge_repo() -> TempDir {
-    let dir = init_repo();
-    let root = dir.path();
-
-    write(
-        root,
-        "src/app.rs",
-        "fn start() {\n    boot();\n}\n\nfn helper() {\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n}\n\nfn stop() {\n    halt();\n}\n",
-    );
-    write(root, "notes/my file.txt", "title\nshared line\nfooter\n");
-    fs::create_dir_all(root.join("assets")).unwrap();
-    fs::write(root.join("assets/logo.bin"), b"aaa\0bbb").unwrap();
-
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "base"]);
-
-    git(root, &["checkout", "-b", "feature"]);
-    write(
-        root,
-        "src/app.rs",
-        "fn start() {\n    boot_v2();\n}\n\nfn helper() {\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n}\n\nfn stop() {\n    halt_v2();\n}\n",
-    );
-    write(
-        root,
-        "notes/my file.txt",
-        "title\nshared line from feature\nfooter\n",
-    );
-    fs::write(root.join("assets/logo.bin"), b"ccc\0ddd").unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "feature changes"]);
-
-    git(root, &["checkout", "main"]);
-    write(
-        root,
-        "src/app.rs",
-        "fn start() {\n    boot_v1();\n}\n\nfn helper() {\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n}\n\nfn stop() {\n    halt_v1();\n}\n",
-    );
-    write(
-        root,
-        "notes/my file.txt",
-        "title\nshared line from main\nfooter\n",
-    );
-    fs::write(root.join("assets/logo.bin"), b"eee\0fff").unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "main changes"]);
-
-    let merge = git_allow_fail(root, &["merge", "feature", "--no-edit", "--no-ff"]);
-    assert!(
-        !merge.status.success(),
-        "expected a conflict, merge succeeded:\n{}",
-        String::from_utf8_lossy(&merge.stdout)
-    );
-    dir
-}
 
 #[test]
 fn help_lists_exit_codes() {
@@ -140,7 +18,9 @@ fn help_lists_exit_codes() {
         .success()
         .stdout(predicate::str::contains("Exit codes:"))
         .stdout(predicate::str::contains("--json"))
-        .stdout(predicate::str::contains("--apply"));
+        .stdout(predicate::str::contains("--apply"))
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--stage"));
 }
 
 #[test]
@@ -267,18 +147,16 @@ fn mid_merge_human_output_uses_labels() {
 }
 
 #[test]
-fn apply_without_resolver_writes_nothing() {
+fn apply_without_api_key_exits_2() {
     let dir = mid_merge_repo();
     let before = fs::read_to_string(dir.path().join("src/app.rs")).unwrap();
     truce(dir.path())
         .args(["--apply", "--no-color"])
         .assert()
-        .code(1);
+        .code(2)
+        .stderr(predicate::str::contains("OPENROUTER_API_KEY"));
     let after = fs::read_to_string(dir.path().join("src/app.rs")).unwrap();
-    assert_eq!(
-        before, after,
-        "--apply must not rewrite files without resolutions"
-    );
+    assert_eq!(before, after);
     assert!(before.contains("<<<<<<<"));
 }
 
@@ -329,7 +207,6 @@ fn diff3_style_includes_base() {
 #[test]
 fn parse_error_on_unmerged_file_exits_2() {
     let dir = mid_merge_repo();
-    // Leave the index unmerged but smash the working-tree markers.
     fs::write(
         dir.path().join("src/app.rs"),
         "<<<<<<< HEAD\nthis is never closed\n",
@@ -360,7 +237,6 @@ fn no_color_env_strips_ansi() {
     );
 }
 
-/// Touch a path so the compiler keeps PathBuf import used on all platforms.
 #[test]
 fn repo_root_is_absolute() {
     let dir = init_repo();

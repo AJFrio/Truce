@@ -45,6 +45,18 @@ pub enum TruceError {
 
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("OPENROUTER_API_KEY is not set (required for --apply)")]
+    MissingApiKey,
+
+    #[error("OpenRouter authentication failed")]
+    OpenRouterAuth,
+
+    #[error("OpenRouter request failed: {0}")]
+    OpenRouter(String),
+
+    #[error("invalid configuration: {0}")]
+    Config(String),
 }
 
 pub type Result<T> = std::result::Result<T, TruceError>;

@@ -81,6 +81,37 @@ impl GitRepo {
 
         Ok(paths)
     }
+
+    /// `git add --` the given repo-relative paths. No-op when `paths` is empty.
+    pub fn stage(&self, paths: &[PathBuf]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut cmd = Command::new("git");
+        cmd.arg("add").arg("--");
+        for path in paths {
+            cmd.arg(path);
+        }
+        let output = cmd
+            .current_dir(&self.root)
+            .env("LC_ALL", "C")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|err| {
+                if err.kind() == ErrorKind::NotFound {
+                    TruceError::GitNotFound
+                } else {
+                    TruceError::Io(err)
+                }
+            })?;
+        if !output.status.success() {
+            return Err(TruceError::from_git_output(output.status, &output.stderr));
+        }
+        Ok(())
+    }
 }
 
 /// Run `git` with `cwd` set to `dir`. Never invokes a shell.

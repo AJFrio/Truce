@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,51 @@ pub enum Choice {
     Ours,
     Theirs,
     Merged,
+}
+
+impl fmt::Display for Choice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Ours => "ours",
+            Self::Theirs => "theirs",
+            Self::Merged => "merged",
+        })
+    }
+}
+
+impl Choice {
+    pub fn parse_label(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "ours" | "our" | "ours_side" => Some(Self::Ours),
+            "theirs" | "their" | "theirs_side" => Some(Self::Theirs),
+            "merged" | "merge" | "both" => Some(Self::Merged),
+            _ => None,
+        }
+    }
+}
+
+/// Result of attempting to resolve one hunk.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HunkOutcome {
+    Unresolved,
+    Resolved(Resolution),
+    Rejected(String),
+}
+
+impl HunkOutcome {
+    pub fn resolution(&self) -> Option<&Resolution> {
+        match self {
+            Self::Resolved(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn rejection(&self) -> Option<&str> {
+        match self {
+            Self::Rejected(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 /// A successful resolution of one hunk. Produced by ENG-56's model client.
@@ -148,6 +194,56 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     result
 }
 
+/// Accept a model payload or return a user-facing rejection reason.
+pub fn validate_resolution(
+    text: String,
+    choice: Choice,
+    rationale: String,
+    confidence: f64,
+    min_confidence: f64,
+    ours: &[String],
+    theirs: &[String],
+) -> std::result::Result<Resolution, String> {
+    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+        return Err(format!(
+            "garbage output: confidence {confidence} is not in 0..=1"
+        ));
+    }
+    if confidence < min_confidence {
+        return Err(format!(
+            "confidence {confidence:.2} below min {min_confidence:.2}"
+        ));
+    }
+    if has_conflict_markers(&text) {
+        return Err("leftover conflict markers in resolved text".into());
+    }
+    let both_empty = ours.iter().all(|l| l.is_empty()) && theirs.iter().all(|l| l.is_empty());
+    if is_garbage(&text) && !both_empty {
+        return Err("empty or garbage resolved text".into());
+    }
+    Ok(Resolution {
+        text,
+        choice,
+        rationale,
+        confidence,
+    })
+}
+
+pub fn has_conflict_markers(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.starts_with("<<<<<<<")
+            || line.starts_with(">>>>>>>")
+            || line.starts_with("|||||||")
+            || line == "======="
+            || line.starts_with("======= ")
+    })
+}
+
+fn is_garbage(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || t.chars().all(|c| c.is_whitespace() || c == '\u{fffd}')
+}
+
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = path
         .file_name()
@@ -226,5 +322,51 @@ mod tests {
         let mut resolver = NullResolver;
         let got = resolver.resolve("f.txt", &parsed.hunks[0]).unwrap();
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_markers_empty_and_low_confidence() {
+        let ours = vec!["a".into()];
+        let theirs = vec!["b".into()];
+        assert!(validate_resolution(
+            "<<<<<<< HEAD\na\n".into(),
+            Choice::Merged,
+            "x".into(),
+            0.9,
+            0.7,
+            &ours,
+            &theirs,
+        )
+        .is_err());
+        assert!(validate_resolution(
+            "   ".into(),
+            Choice::Merged,
+            "x".into(),
+            0.9,
+            0.7,
+            &ours,
+            &theirs,
+        )
+        .is_err());
+        assert!(validate_resolution(
+            "ok".into(),
+            Choice::Merged,
+            "x".into(),
+            0.2,
+            0.7,
+            &ours,
+            &theirs,
+        )
+        .is_err());
+        assert!(validate_resolution(
+            "ok".into(),
+            Choice::Merged,
+            "x".into(),
+            0.9,
+            0.7,
+            &ours,
+            &theirs,
+        )
+        .is_ok());
     }
 }

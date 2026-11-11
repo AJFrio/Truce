@@ -7,22 +7,27 @@ use clap::Parser;
 /// Truce scans the current git working tree for unmerged files, parses
 /// conflict hunks, and prints a report. Resolution is preview-only by
 /// default (`--dry-run`). `--apply` writes accepted resolutions back to
-/// the working tree when a resolver is configured.
+/// the working tree. `--stage` runs `git add` on files that were written.
 #[derive(Debug, Parser)]
 #[command(
     name = "truce",
     version,
     about = "Resolve git merge conflicts using fast decision models",
     long_about = "Truce finds merge conflicts in a git working tree, parses each \
-conflict hunk (including optional diff3/zdiff3 base sections), and prints a \
-human or JSON report.\n\n\
-Dry-run is the default: nothing is written. Pass --apply to write resolutions \
-once a resolver is available. Binary and non-UTF-8 files are skipped and \
-reported, never rewritten.\n\n\
+conflict hunk (including optional diff3/zdiff3 base sections), sends hunks to \
+an OpenRouter decision model, and prints a human or JSON report.\n\n\
+Dry-run is the default: the model still runs (when OPENROUTER_API_KEY is set) \
+and a diff-style preview is printed, but nothing is written. Pass --apply to \
+write files that resolved completely. Pass --stage with --apply to `git add` \
+those files. Binary and non-UTF-8 files are skipped and reported, never rewritten.\n\n\
+Model selection: --model, then TRUCE_MODEL, then .truce.toml in the repo root, \
+then $XDG_CONFIG_HOME/truce/config.toml, then the built-in default \
+(openai/gpt-4o-mini).\n\n\
 Color is used only when stdout is a TTY. It is disabled when --no-color is \
 set, when NO_COLOR is present in the environment, or when TERM=dumb. Labels \
-such as OURS/THEIRS/SKIPPED are always printed so the report is readable \
-without color.",
+such as OURS/THEIRS/RESOLVED/REJECTED/SKIPPED are always printed so the \
+report is readable without color.\n\n\
+The API key is read from OPENROUTER_API_KEY and is never printed.",
     after_help = "Exit codes:\n  \
 0  No conflicts, or every conflict was resolved\n  \
 1  Unresolved conflicts remain\n  \
@@ -43,9 +48,37 @@ pub struct Cli {
     /// Write accepted resolutions back to the working tree.
     ///
     /// A file is rewritten only when every hunk in it has a valid resolution.
-    /// Truce does not `git add` the result.
     #[arg(long, overrides_with = "dry_run")]
     pub apply: bool,
+
+    /// `git add` files after a successful `--apply` write.
+    #[arg(long)]
+    pub stage: bool,
+
+    /// OpenRouter model id (overrides TRUCE_MODEL and config files).
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+
+    /// Reject resolutions below this confidence (0–1). Default: 0.7.
+    #[arg(long, value_name = "N")]
+    pub min_confidence: Option<f64>,
+
+    /// Max in-flight OpenRouter requests.
+    #[arg(long, value_name = "N")]
+    pub concurrency: Option<usize>,
+
+    /// Per-request timeout in seconds. Default: 30.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+
+    /// Retries after the first attempt for 429/5xx/timeouts. Default: 3.
+    #[arg(long, value_name = "N")]
+    pub retries: Option<u32>,
+
+    /// OpenRouter API base URL (for tests or a proxy). Default:
+    /// https://openrouter.ai/api/v1
+    #[arg(long, value_name = "URL")]
+    pub base_url: Option<String>,
 
     /// Lines of surrounding context to include with each hunk.
     #[arg(long, value_name = "N", default_value_t = 3)]
@@ -82,6 +115,9 @@ mod tests {
         assert!(help.contains("--json"), "{help}");
         assert!(help.contains("--apply"), "{help}");
         assert!(help.contains("--dry-run"), "{help}");
+        assert!(help.contains("--model"), "{help}");
+        assert!(help.contains("--stage"), "{help}");
+        assert!(help.contains("OPENROUTER_API_KEY"), "{help}");
         assert!(help.contains("NO_COLOR"), "{help}");
     }
 
@@ -90,6 +126,7 @@ mod tests {
         let cli = Cli::parse_from(["truce"]);
         assert!(!cli.should_apply());
         assert!(!cli.json);
+        assert!(!cli.stage);
         assert_eq!(cli.context, 3);
     }
 
