@@ -12,14 +12,19 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 anyhow = "1.0.93"
 clap = { version = "=4.5.23", features = ["derive"] }
+reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
 thiserror = "2.0.3"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+toml = "0.8.19"
 
 [dev-dependencies]
 assert_cmd = "~2.0.16"
 predicates = "~3.1.2"
 tempfile = "~3.14.0"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+wiremock = "0.6.2"
 
 [profile.release]
 lto = false
