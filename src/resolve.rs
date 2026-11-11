@@ -1,0 +1,230 @@
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{Result, TruceError};
+use crate::parse::{join_lines, LineEnding, ParsedFile};
+use crate::Hunk;
+
+/// Which side (or blend) a resolver picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Choice {
+    Ours,
+    Theirs,
+    Merged,
+}
+
+/// A successful resolution of one hunk. Produced by ENG-56's model client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Resolution {
+    pub text: String,
+    pub choice: Choice,
+    pub rationale: String,
+    pub confidence: f64,
+}
+
+/// Pluggable hunk resolver. ENG-55 ships a no-op; ENG-56 supplies OpenRouter.
+pub trait Resolver {
+    fn resolve(&mut self, path: &str, hunk: &Hunk) -> Result<Option<Resolution>>;
+}
+
+/// Always leaves hunks unresolved. Used until a real resolver is wired.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullResolver;
+
+impl Resolver for NullResolver {
+    fn resolve(&mut self, _path: &str, _hunk: &Hunk) -> Result<Option<Resolution>> {
+        Ok(None)
+    }
+}
+
+/// Rebuild a file body from resolved hunks.
+///
+/// Returns `Ok(None)` when any hunk is missing a resolution — callers must not
+/// write a partial file. Replacements cover the full marker span
+/// (`<<<<<<<` through `>>>>>>>`).
+pub fn reconstruct(
+    parsed: &ParsedFile,
+    resolutions: &[Option<Resolution>],
+) -> Result<Option<String>> {
+    if parsed.hunks.is_empty() {
+        return Ok(None);
+    }
+    if parsed.hunks.len() != resolutions.len() {
+        return Err(TruceError::Write {
+            path: PathBuf::from("<memory>"),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "internal error: {} hunks but {} resolutions",
+                    parsed.hunks.len(),
+                    resolutions.len()
+                ),
+            ),
+        });
+    }
+    if resolutions.iter().any(|r| r.is_none()) {
+        return Ok(None);
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut line_no = 1usize;
+    let mut hunk_idx = 0usize;
+    while line_no <= parsed.lines.len() {
+        if hunk_idx < parsed.hunks.len() && line_no == parsed.hunks[hunk_idx].start_line {
+            let text = &resolutions[hunk_idx].as_ref().expect("checked None").text;
+            out.extend(split_resolution(text, parsed.line_ending));
+            line_no = parsed.hunks[hunk_idx].end_line + 1;
+            hunk_idx += 1;
+        } else {
+            out.push(parsed.lines[line_no - 1].clone());
+            line_no += 1;
+        }
+    }
+
+    Ok(Some(join_lines(
+        &out,
+        parsed.line_ending,
+        parsed.trailing_newline,
+    )))
+}
+
+fn split_resolution(text: &str, file_eol: LineEnding) -> Vec<String> {
+    let normalized = match file_eol {
+        LineEnding::Crlf => text.replace("\r\n", "\n"),
+        LineEnding::Lf => text.to_string(),
+    };
+    let trailing = normalized.ends_with('\n');
+    let mut lines: Vec<String> = normalized.split('\n').map(str::to_string).collect();
+    if trailing {
+        lines.pop();
+    }
+    // A resolution that is itself empty means "delete the hunk".
+    if lines.len() == 1 && lines[0].is_empty() && text.is_empty() {
+        lines.clear();
+    }
+    lines
+}
+
+/// Write `contents` to `path` via a same-directory temp file + rename.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let tmp = temp_path(path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|source| TruceError::Write {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+
+    let result = (|| {
+        let mut file = fs::File::create(&tmp).map_err(|source| TruceError::Write {
+            path: tmp.clone(),
+            source,
+        })?;
+        file.write_all(contents)
+            .map_err(|source| TruceError::Write {
+                path: tmp.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| TruceError::Write {
+            path: tmp.clone(),
+            source,
+        })?;
+        fs::rename(&tmp, path).map_err(|source| TruceError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("file"))
+        .to_os_string();
+    name.push(".truce.tmp");
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::parse_conflicts;
+
+    fn res(text: &str) -> Resolution {
+        Resolution {
+            text: text.to_string(),
+            choice: Choice::Merged,
+            rationale: "test".into(),
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn reconstruct_replaces_marker_span() {
+        let text = "keep\n<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\nend\n";
+        let parsed = parse_conflicts(text, 0).unwrap();
+        let out = reconstruct(&parsed, &[Some(res("c"))]).unwrap().unwrap();
+        assert_eq!(out, "keep\nc\nend\n");
+    }
+
+    #[test]
+    fn reconstruct_refuses_partial_files() {
+        let text = "\
+<<<<<<< A
+1
+=======
+2
+>>>>>>> B
+<<<<<<< A
+3
+=======
+4
+>>>>>>> B
+";
+        let parsed = parse_conflicts(text, 0).unwrap();
+        let out = reconstruct(&parsed, &[Some(res("x")), None]).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn reconstruct_preserves_crlf() {
+        let text = "keep\r\n<<<<<<< HEAD\r\na\r\n=======\r\nb\r\n>>>>>>> x\r\nend\r\n";
+        let parsed = parse_conflicts(text, 0).unwrap();
+        let out = reconstruct(&parsed, &[Some(res("c"))]).unwrap().unwrap();
+        assert_eq!(out, "keep\r\nc\r\nend\r\n");
+    }
+
+    #[test]
+    fn write_atomic_round_trip() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("truce-atomic-{}.txt", std::process::id()));
+        write_atomic(&path, b"hello\n").unwrap();
+        let got = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(got, b"hello\n");
+    }
+
+    #[test]
+    fn null_resolver_never_resolves() {
+        let text = "<<<<<<< A\n1\n=======\n2\n>>>>>>> B\n";
+        let parsed = parse_conflicts(text, 0).unwrap();
+        let mut resolver = NullResolver;
+        let got = resolver.resolve("f.txt", &parsed.hunks[0]).unwrap();
+        assert!(got.is_none());
+    }
+}

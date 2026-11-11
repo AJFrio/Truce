@@ -1,0 +1,13 @@
+header
+<<<<<<< HEAD
+one-a
+=======
+one-b
+>>>>>>> feature
+middle
+<<<<<<< HEAD
+two-a
+=======
+two-b
+>>>>>>> feature
+footer
