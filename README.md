@@ -15,8 +15,16 @@ From a clone of this repository:
 cargo install --path .
 ```
 
+From git without cloning:
+
+```bash
+cargo install --git https://github.com/AJFrio/Truce --locked
+```
+
 Requires Rust 1.80 or newer (see `rust-version` in `Cargo.toml`). `git` must be
-on `PATH`.
+on `PATH`. Prebuilt binaries for Linux, macOS, and Windows are attached to
+[GitHub Releases](https://github.com/AJFrio/Truce/releases) (checksums in
+`SHA256SUMS`).
 
 ## Usage
 
@@ -60,13 +68,15 @@ truce [OPTIONS] [PATH]...
   --base-url <URL>       API base (tests / proxy)
   --context <N>          Surrounding context lines per hunk [default: 3]
   --no-color             Disable ANSI color even on a TTY
+  --ci                   GitHub Actions mode (also auto-detected)
   PATH                   Limit scanning to these files or directories
 ```
 
 Human output is colorized only when stdout is a TTY. Color is disabled if you
-pass `--no-color`, if `NO_COLOR` is set, or if `TERM=dumb`. Status words such as
-`OURS`, `THEIRS`, `BASE`, `CONFLICTED`, `SKIPPED`, `RESOLVED`, and `REJECTED`
-are always printed, so the report does not depend on color.
+pass `--no-color` or `--ci`, if `GITHUB_ACTIONS=true`, if `NO_COLOR` is set, or
+if `TERM=dumb`. Status words such as `OURS`, `THEIRS`, `BASE`, `CONFLICTED`,
+`SKIPPED`, `RESOLVED`, and `REJECTED` are always printed, so the report does
+not depend on color.
 
 Binary files (NUL bytes) and non-UTF-8 files are skipped and listed; they are
 never rewritten. Paths with spaces are handled. Malformed or unterminated
@@ -186,3 +196,43 @@ Notes:
    Other 4xx errors are not retried.
 5. Valid resolutions are previewed as a diff. `--apply` writes atomically
    (temp file + rename) and preserves the file's line endings.
+
+## GitHub Actions
+
+`--ci`, or `GITHUB_ACTIONS=true`, turns on CI mode: no color, non-interactive,
+`::error` / `::warning` workflow annotations (file + line), and a Markdown job
+summary appended to `$GITHUB_STEP_SUMMARY`. Exit codes stay 0 / 1 / 2.
+
+A composite action lives at the repository root (`action.yml`). Copy
+[`examples/truce-pr.yml`](examples/truce-pr.yml) into a consuming repo's
+`.github/workflows/` — that file is an example only and is not active here.
+
+```yaml
+- uses: AJFrio/Truce@v1
+  with:
+    openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+    mode: report          # or commit
+    # model: openai/gpt-4o-mini
+    # min-confidence: "0.7"
+    # target-branch: main
+```
+
+| Input | Default | Notes |
+| --- | --- | --- |
+| `openrouter-api-key` | required | Pass `secrets.OPENROUTER_API_KEY`. Never echoed. |
+| `mode` | `report` | `report` previews; `commit` applies, stages, commits, and pushes a `truce/resolve-*` branch **only when every conflict resolved** (truce exit 0). A clean merge exits 0 without pushing. Unresolved hunks skip commit/push and keep truce's exit code. |
+| `model` | config / `openai/gpt-4o-mini` | OpenRouter model id. |
+| `min-confidence` | `0.7` | Reject below this confidence. |
+| `target-branch` | `github.base_ref` | Branch merged into the PR head before Truce runs. |
+| `github-token` | `github.token` | Checkout (and push in commit mode). |
+
+Store the OpenRouter key as the repository secret `OPENROUTER_API_KEY`. Do not
+put it in logs, `echo`, or workflow `run:` argv. Report mode needs
+`contents: read`. Commit mode needs `contents: write` so the default token can
+push.
+
+This repository's own CI (`.github/workflows/ci.yml`) runs `cargo fmt`,
+`clippy -D warnings`, and `cargo test` on Ubuntu, macOS, and Windows. A
+release workflow (`.github/workflows/release.yml`) builds tagged `v*` releases
+for linux x86_64/aarch64, macOS arm64/x86_64, and Windows x86_64, and attaches
+SHA-256 checksums.

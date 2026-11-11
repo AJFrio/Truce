@@ -1,0 +1,42 @@
+# Example workflow — copy into .github/workflows/ of a repository that
+# wants Truce to run on pull requests. This file is not active in the
+# Truce repo itself.
+#
+# Required repository secret: OPENROUTER_API_KEY
+# Never echo that secret. Pass it only through `openrouter-api-key`.
+
+name: truce
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Report mode only needs read access to the repo contents.
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve conflicts (preview)
+        uses: AJFrio/Truce@v1
+        with:
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          mode: report
+          # model: openai/gpt-4o-mini
+          # min-confidence: "0.7"
+          # target-branch: main
+
+  # Uncomment to apply resolutions, commit, and push a branch.
+  # That job needs contents: write so the default GITHUB_TOKEN can push.
+  #
+  # commit:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: write
+  #   steps:
+  #     - uses: AJFrio/Truce@v1
+  #       with:
+  #         openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+  #         mode: commit

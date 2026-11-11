@@ -27,7 +27,10 @@ Color is used only when stdout is a TTY. It is disabled when --no-color is \
 set, when NO_COLOR is present in the environment, or when TERM=dumb. Labels \
 such as OURS/THEIRS/RESOLVED/REJECTED/SKIPPED are always printed so the \
 report is readable without color.\n\n\
-The API key is read from OPENROUTER_API_KEY and is never printed.",
+The API key is read from OPENROUTER_API_KEY and is never printed.\n\n\
+CI mode (--ci, or GITHUB_ACTIONS=true) disables color, emits GitHub \
+::error/::warning annotations, and appends a Markdown job summary to \
+$GITHUB_STEP_SUMMARY.",
     after_help = "Exit codes:\n  \
 0  No conflicts, or every conflict was resolved\n  \
 1  Unresolved conflicts remain\n  \
@@ -88,6 +91,13 @@ pub struct Cli {
     #[arg(long)]
     pub no_color: bool,
 
+    /// GitHub Actions CI mode (also auto-detected from GITHUB_ACTIONS=true).
+    ///
+    /// Non-interactive, no color, `::error`/`::warning` annotations, and a
+    /// job summary at `$GITHUB_STEP_SUMMARY`.
+    #[arg(long)]
+    pub ci: bool,
+
     /// Limit scanning to these paths (relative to the repo or cwd).
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
@@ -97,6 +107,11 @@ impl Cli {
     /// True when the user asked to write files (`--apply` and not `--dry-run`).
     pub fn should_apply(&self) -> bool {
         self.apply && !self.dry_run
+    }
+
+    /// `--ci` or `GITHUB_ACTIONS=true`.
+    pub fn ci_mode(&self) -> bool {
+        crate::ci::enabled(self)
     }
 }
 
@@ -119,6 +134,8 @@ mod tests {
         assert!(help.contains("--stage"), "{help}");
         assert!(help.contains("OPENROUTER_API_KEY"), "{help}");
         assert!(help.contains("NO_COLOR"), "{help}");
+        assert!(help.contains("--ci"), "{help}");
+        assert!(help.contains("GITHUB_ACTIONS"), "{help}");
     }
 
     #[test]
@@ -127,6 +144,7 @@ mod tests {
         assert!(!cli.should_apply());
         assert!(!cli.json);
         assert!(!cli.stage);
+        assert!(!cli.ci);
         assert_eq!(cli.context, 3);
     }
 

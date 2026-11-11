@@ -76,7 +76,10 @@ pub fn truce(dir: &Path) -> Truce {
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("TRUCE_MODEL")
         .env_remove("TRUCE_BASE_URL")
-        .env_remove("OPENROUTER_BASE_URL");
+        .env_remove("OPENROUTER_BASE_URL")
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .env_remove("GITHUB_BASE_REF");
     cmd
 }
 
@@ -132,6 +135,51 @@ pub fn mid_merge_repo() -> TempDir {
         "expected a conflict, merge succeeded:\n{}",
         String::from_utf8_lossy(&merge.stdout)
     );
+    dir
+}
+
+/// Two branches that merge cleanly, currently on `feature`.
+pub fn two_branch_clean_repo() -> TempDir {
+    let dir = init_repo();
+    let root = dir.path();
+    write(root, "base.txt", "base\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "base"]);
+
+    git(root, &["checkout", "-b", "feature"]);
+    write(root, "feature.txt", "feature\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "feature"]);
+
+    git(root, &["checkout", "main"]);
+    write(root, "main.txt", "main\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "main"]);
+
+    git(root, &["checkout", "feature"]);
+    dir
+}
+
+/// Two branches that conflict, currently on `feature` with a clean tree.
+/// The action script fetches/merges `main` (or `TRUCE_MERGE_REF`) itself.
+pub fn two_branch_repo() -> TempDir {
+    let dir = init_repo();
+    let root = dir.path();
+    write(root, "letter.txt", "hello\nalpha\nbye\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "base"]);
+
+    git(root, &["checkout", "-b", "feature"]);
+    write(root, "letter.txt", "hello\nbeta\nbye\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "feature"]);
+
+    git(root, &["checkout", "main"]);
+    write(root, "letter.txt", "hello\nomega\nbye\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "main"]);
+
+    git(root, &["checkout", "feature"]);
     dir
 }
 

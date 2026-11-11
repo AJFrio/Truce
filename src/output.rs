@@ -209,7 +209,7 @@ impl Report {
 }
 
 pub fn wants_color(cli: &Cli) -> bool {
-    if cli.no_color || cli.json {
+    if cli.no_color || cli.json || cli.ci_mode() {
         return false;
     }
     if std::env::var_os("NO_COLOR").is_some() {
@@ -269,6 +269,9 @@ impl Palette {
 
 /// Print the report. JSON is compact-pretty; human form uses labels, not color alone.
 pub fn print_report(report: &Report, cli: &Cli) -> io::Result<()> {
+    if crate::ci::enabled(cli) {
+        crate::ci::emit(report)?;
+    }
     let stdout = io::stdout();
     let mut out = stdout.lock();
     if cli.json {

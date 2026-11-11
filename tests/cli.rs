@@ -20,7 +20,8 @@ fn help_lists_exit_codes() {
         .stdout(predicate::str::contains("--json"))
         .stdout(predicate::str::contains("--apply"))
         .stdout(predicate::str::contains("--model"))
-        .stdout(predicate::str::contains("--stage"));
+        .stdout(predicate::str::contains("--stage"))
+        .stdout(predicate::str::contains("--ci"));
 }
 
 #[test]
