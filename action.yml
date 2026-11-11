@@ -1,0 +1,65 @@
+name: Truce
+description: Resolve git merge conflicts with an OpenRouter decision model
+branding:
+  icon: git-merge
+  color: yellow
+
+inputs:
+  model:
+    description: OpenRouter model id (overrides TRUCE_MODEL / config)
+    required: false
+    default: ""
+  min-confidence:
+    description: Reject resolutions below this confidence (0–1)
+    required: false
+    default: "0.7"
+  mode:
+    description: report (preview only) or commit (apply, stage, commit, push)
+    required: false
+    default: report
+  target-branch:
+    description: Branch to merge into the PR head (defaults to github.base_ref)
+    required: false
+    default: ""
+  openrouter-api-key:
+    description: OpenRouter API key. Pass from secrets.OPENROUTER_API_KEY. Never echoed.
+    required: true
+  github-token:
+    description: Token used to checkout and (in commit mode) push
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: ${{ github.head_ref || github.ref }}
+        token: ${{ inputs.github-token }}
+
+    - name: Install stable Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ${{ github.action_path }}
+
+    - name: Install truce
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        CARGO_TARGET_DIR: ${{ github.action_path }}/target
+      run: cargo install --path . --locked --root "${HOME}/.cargo" --force
+
+    - name: Merge base branch and run truce
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        TRUCE_MODEL: ${{ inputs.model }}
+        TRUCE_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        TRUCE_MODE: ${{ inputs.mode }}
+        TRUCE_TARGET_BRANCH: ${{ inputs.target-branch }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/truce-action.sh"

@@ -1,5 +1,6 @@
 //! Truce: find, parse, and resolve git merge conflicts in a working tree.
 
+pub mod ci;
 pub mod cli;
 pub mod config;
 pub mod error;
