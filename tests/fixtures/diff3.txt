@@ -1,0 +1,8 @@
+<<<<<<< ours
+omega
+||||||| merged common ancestors
+alpha
+
+=======
+beta
+>>>>>>> theirs
