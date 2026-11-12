@@ -1,5 +1,5 @@
-name: Truce
-description: Resolve git merge conflicts with an OpenRouter decision model
+name: Truce, CLI Conflict Resolver
+description: Resolve git merge conflicts quickly
 branding:
   icon: git-merge
   color: yellow
