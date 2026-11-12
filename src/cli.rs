@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 /// Resolve git merge conflicts using fast decision models.
 ///
@@ -20,6 +20,9 @@ Dry-run is the default: the model still runs (when OPENROUTER_API_KEY is set) \
 and a diff-style preview is printed, but nothing is written. Pass --apply to \
 write files that resolved completely. Pass --stage with --apply to `git add` \
 those files. Binary and non-UTF-8 files are skipped and reported, never rewritten.\n\n\
+`truce sync` fetches a base branch (default origin/main), merges it into the \
+current branch, resolves conflicts, and commits. It pushes only with --push. \
+See `truce sync --help` for abort rules and exit codes.\n\n\
 Model selection for the decision model: --model, then TRUCE_MODEL, then \
 .truce.toml in the repo root, then $XDG_CONFIG_HOME/truce/config.toml, then \
 liquid/d1-ultra. That model is called via OpenRouter System One \
@@ -42,11 +45,20 @@ $GITHUB_STEP_SUMMARY.",
 0  No conflicts, or every conflict was resolved\n  \
 1  Unresolved conflicts remain\n  \
 2  Usage error or runtime failure\n\n\
+`truce sync` uses the same 0 / 1 / 2 codes. Exit 1 is an abort that restores \
+HEAD (unresolved, low confidence, binary, modify/delete, rename, or a failed \
+--verify-cmd). Exit 2 is a refusal or error (dirty tree, detached HEAD, merge \
+already in progress, git or API failure). A failed --push keeps the local \
+commit and still exits 2.\n\n\
 JSON schema:\n  \
 --json emits a single object with schema_version = 1. See README.md for the \
-full schema."
+full schema. `truce sync --json` emits a sync report, also schema_version 1, \
+with \"command\": \"sync\"."
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Emit a machine-readable JSON report to stdout (schema_version 1).
     #[arg(long)]
     pub json: bool,
@@ -65,6 +77,109 @@ pub struct Cli {
     #[arg(long)]
     pub stage: bool,
 
+    #[command(flatten)]
+    pub models: ModelArgs,
+
+    /// Lines of surrounding context to include with each hunk.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub context: usize,
+
+    /// Disable ANSI color even when stdout is a TTY.
+    #[arg(long)]
+    pub no_color: bool,
+
+    /// GitHub Actions CI mode (also auto-detected from GITHUB_ACTIONS=true).
+    ///
+    /// Non-interactive, no color, `::error`/`::warning` annotations, and a
+    /// job summary at `$GITHUB_STEP_SUMMARY`.
+    #[arg(long)]
+    pub ci: bool,
+
+    /// Limit scanning to these paths (relative to the repo or cwd).
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+}
+
+/// `truce sync` fetches a base, merges or rebases it, and resolves conflicts.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Fetch the base, merge or rebase it into HEAD, and resolve conflicts.
+    Sync(SyncArgs),
+}
+
+/// Flags for `truce sync`.
+///
+/// Merge is the default. `--rebase` replays the branch onto the base and is
+/// experimental: each conflicted commit is resolved, then `git rebase
+/// --continue` keeps that commit's original message. A failure runs
+/// `git rebase --abort` and restores the original HEAD.
+#[derive(Debug, Args)]
+#[command(after_help = "Exit codes:\n  \
+0  Up to date, fast-forward, clean merge, clean rebase, or conflicts resolved and committed\n  \
+1  Aborted and HEAD restored: unresolved, below --min-confidence after escalation, \
+binary, modify/delete, rename/delete, rename/rename, or --verify-cmd failed\n  \
+2  Refused or error: dirty tree, detached HEAD, merge already in progress, \
+missing git identity, fetch failure, API failure, or push failure\n\n\
+A clean fast-forward moves HEAD and does not create a commit. A clean merge of \
+diverged histories creates git's ordinary merge commit and no second commit. \
+Truce writes its own commit message only when it resolves conflicts.\n\n\
+Push runs only with --push, and only after the sync commit succeeds. A push \
+failure keeps that commit and exits 2.\n\n\
+--verify-cmd runs after resolution and before the commit, through sh -c \
+(or cmd /C on Windows). A non-zero status aborts the merge or rebase, \
+restores HEAD, and exits 1.")]
+pub struct SyncArgs {
+    /// Base ref to fetch and integrate. Default: origin/main.
+    ///
+    /// When this ref does not exist, Truce uses the remote's default branch
+    /// (`origin/HEAD` after `git remote set-head --auto`).
+    #[arg(long, value_name = "REF", default_value = "origin/main")]
+    pub base: String,
+
+    /// Rebase onto the base instead of merging. Experimental.
+    ///
+    /// Conflicts are resolved per commit. Commit messages stay the originals.
+    /// The JSON report lists every resolved hunk. On failure, `git rebase --abort`
+    /// restores the original HEAD.
+    #[arg(long)]
+    pub rebase: bool,
+
+    /// Push the current branch to origin after a successful sync. Never force-pushes.
+    #[arg(long)]
+    pub push: bool,
+
+    /// Shell command run after resolution and before the commit.
+    ///
+    /// Unix: `sh -c <cmd>`. Windows: `cmd /C <cmd>`. A non-zero exit aborts
+    /// and restores HEAD (exit 1).
+    #[arg(long, value_name = "CMD")]
+    pub verify_cmd: Option<String>,
+
+    /// Emit the sync JSON report to stdout (schema_version 1, command "sync").
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub models: ModelArgs,
+
+    /// Lines of surrounding context to include with each hunk.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub context: usize,
+
+    /// Disable ANSI color even when stdout is a TTY.
+    ///
+    /// Sync's human report is plain text either way.
+    #[arg(long)]
+    pub no_color: bool,
+
+    /// GitHub Actions CI mode (also auto-detected from GITHUB_ACTIONS=true).
+    #[arg(long)]
+    pub ci: bool,
+}
+
+/// Decision-model flags shared by `truce` and `truce sync`.
+#[derive(Debug, Clone, Args)]
+pub struct ModelArgs {
     /// OpenRouter System One decision model (overrides TRUCE_MODEL and config).
     ///
     /// Default: liquid/d1-ultra. Called via POST /api/v1/systemone, not chat
@@ -85,7 +200,8 @@ pub struct Cli {
     /// Accept a decision at or above this confidence (0–1). Default: 0.7.
     ///
     /// Overrides TRUCE_MIN_CONFIDENCE and config. A side choice below this
-    /// threshold escalates the hunk to the code model.
+    /// threshold escalates the hunk to the code model. After escalation, a
+    /// result still below this threshold is unresolved.
     #[arg(long, value_name = "N")]
     pub min_confidence: Option<f64>,
 
@@ -105,25 +221,13 @@ pub struct Cli {
     /// https://openrouter.ai/api/v1
     #[arg(long, value_name = "URL")]
     pub base_url: Option<String>,
+}
 
-    /// Lines of surrounding context to include with each hunk.
-    #[arg(long, value_name = "N", default_value_t = 3)]
-    pub context: usize,
-
-    /// Disable ANSI color even when stdout is a TTY.
-    #[arg(long)]
-    pub no_color: bool,
-
-    /// GitHub Actions CI mode (also auto-detected from GITHUB_ACTIONS=true).
-    ///
-    /// Non-interactive, no color, `::error`/`::warning` annotations, and a
-    /// job summary at `$GITHUB_STEP_SUMMARY`.
-    #[arg(long)]
-    pub ci: bool,
-
-    /// Limit scanning to these paths (relative to the repo or cwd).
-    #[arg(value_name = "PATH")]
-    pub paths: Vec<PathBuf>,
+impl SyncArgs {
+    /// `--ci` or `GITHUB_ACTIONS=true`.
+    pub fn ci_mode(&self) -> bool {
+        self.ci || crate::ci::env_true("GITHUB_ACTIONS")
+    }
 }
 
 impl Cli {
@@ -162,6 +266,53 @@ mod tests {
         assert!(help.contains("NO_COLOR"), "{help}");
         assert!(help.contains("--ci"), "{help}");
         assert!(help.contains("GITHUB_ACTIONS"), "{help}");
+        assert!(help.contains("sync"), "{help}");
+    }
+
+    #[test]
+    fn sync_subcommand_parses_its_flags() {
+        let cli = Cli::parse_from([
+            "truce",
+            "sync",
+            "--base",
+            "origin/dev",
+            "--rebase",
+            "--push",
+            "--verify-cmd",
+            "cargo test",
+            "--min-confidence",
+            "0.5",
+            "--model",
+            "m",
+            "--code-model",
+            "c",
+            "--json",
+        ]);
+        let Some(Command::Sync(args)) = cli.command else {
+            panic!("expected sync");
+        };
+        assert_eq!(args.base, "origin/dev");
+        assert!(args.rebase);
+        assert!(args.push);
+        assert_eq!(args.verify_cmd.as_deref(), Some("cargo test"));
+        assert_eq!(args.models.min_confidence, Some(0.5));
+        assert_eq!(args.models.model.as_deref(), Some("m"));
+        assert_eq!(args.models.code_model.as_deref(), Some("c"));
+        assert!(args.json);
+        assert!(!args.ci);
+    }
+
+    #[test]
+    fn sync_defaults_to_merge_origin_main() {
+        let cli = Cli::parse_from(["truce", "sync"]);
+        let Some(Command::Sync(args)) = cli.command else {
+            panic!("expected sync");
+        };
+        assert_eq!(args.base, "origin/main");
+        assert!(!args.rebase);
+        assert!(!args.push);
+        assert!(args.verify_cmd.is_none());
+        assert_eq!(args.context, 3);
     }
 
     #[test]

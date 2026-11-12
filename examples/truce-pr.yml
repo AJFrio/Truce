@@ -1,6 +1,9 @@
 # Example workflow — copy into .github/workflows/ of a repository that
-# wants Truce to run on pull requests. This file is not active in the
+# wants Truce to report on pull requests. This file is not active in the
 # Truce repo itself.
+#
+# To sync the branch before tests, copy examples/truce-sync.yml.
+# For GitHub's merge queue, copy examples/truce-merge-queue.yml.
 #
 # Required repository secret: OPENROUTER_API_KEY
 # Never echo that secret. Pass it only through `openrouter-api-key`.

@@ -29,6 +29,52 @@ note() {
   fi
 }
 
+# Base branch name without refs/heads/. merge_group events store it on
+# the payload as base_ref (refs/heads/main); pull_request sets GITHUB_BASE_REF.
+resolve_target() {
+  local target="${TRUCE_TARGET_BRANCH:-}"
+  if [[ -z "$target" && "${GITHUB_EVENT_NAME:-}" == "merge_group" && -n "${GITHUB_EVENT_PATH:-}" && -f "${GITHUB_EVENT_PATH}" ]]; then
+    target="$(sed -n 's/.*"base_ref"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${GITHUB_EVENT_PATH}" | head -n 1 || true)"
+  fi
+  if [[ -z "$target" ]]; then
+    target="${GITHUB_BASE_REF:-main}"
+  fi
+  target="${target#refs/heads/}"
+  printf '%s\n' "$target"
+}
+
+# mode=sync: truce itself fetches, merges, resolves, and commits.
+# Push is opt-in (TRUCE_PUSH=true). This returns before the legacy merge path.
+run_sync() {
+  local target="$1"
+  local sync_args=(sync --ci --no-color --base "origin/${target}")
+  if [[ -n "$model" ]]; then
+    sync_args+=(--model "$model")
+  fi
+  if [[ -n "$code_model" ]]; then
+    sync_args+=(--code-model "$code_model")
+  fi
+  if [[ -n "$min_conf" ]]; then
+    sync_args+=(--min-confidence "$min_conf")
+  fi
+  case "${TRUCE_PUSH:-}" in
+    1|true|TRUE|True) sync_args+=(--push) ;;
+  esac
+  if [[ -n "${TRUCE_VERIFY_CMD:-}" ]]; then
+    sync_args+=(--verify-cmd "${TRUCE_VERIFY_CMD}")
+  fi
+  echo "Running truce sync (base=origin/${target}; push=${TRUCE_PUSH:-false}; key_set=${OPENROUTER_API_KEY:+yes})"
+  set +e
+  "${bin}" "${sync_args[@]}"
+  local code=$?
+  set -e
+  exit "$code"
+}
+
+if [[ "$mode" == "sync" ]]; then
+  run_sync "$(resolve_target)"
+fi
+
 if [[ "${TRUCE_SKIP_FETCH:-}" != "1" ]]; then
   if [[ -z "$target" ]]; then
     target="${GITHUB_BASE_REF:-main}"

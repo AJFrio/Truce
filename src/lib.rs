@@ -13,6 +13,7 @@ pub mod openrouter;
 pub mod output;
 pub mod parse;
 pub mod resolve;
+mod sync;
 
 use std::fs;
 use std::io::ErrorKind;
@@ -28,7 +29,16 @@ use parse::LineEnding as Eol;
 use resolve::{reconstruct, write_atomic, AttemptInfo, HunkOutcome, Resolution};
 
 /// Run truce with an already-parsed CLI. Returns the process exit code.
-pub async fn run(cli: Cli) -> Result<i32> {
+pub async fn run(mut cli: Cli) -> Result<i32> {
+    if let Some(command) = cli.command.take() {
+        return match command {
+            cli::Command::Sync(args) => sync::run(args).await,
+        };
+    }
+    run_resolve(cli).await
+}
+
+async fn run_resolve(cli: Cli) -> Result<i32> {
     let cwd = std::env::current_dir()?;
     let repo = GitRepo::discover(&cwd)?;
     let settings = config::load(&cli, &repo.root)?;
@@ -94,7 +104,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
     }
 }
 
-fn scan_file(repo_root: &Path, rel: PathBuf, context: usize) -> Result<FileScan> {
+pub(crate) fn scan_file(repo_root: &Path, rel: PathBuf, context: usize) -> Result<FileScan> {
     let abs = repo_root.join(&rel);
     match fs::read(&abs) {
         Ok(bytes) => classify_bytes(rel, bytes, context),
@@ -185,7 +195,7 @@ fn skipped(rel: PathBuf, status: FileStatus, reason: &str) -> FileScan {
     }
 }
 
-fn write_resolved_files(repo_root: &Path, scans: &[FileScan]) -> Result<Vec<PathBuf>> {
+pub(crate) fn write_resolved_files(repo_root: &Path, scans: &[FileScan]) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for scan in scans {
         if scan.status != FileStatus::Conflicted || scan.hunks.is_empty() {

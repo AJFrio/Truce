@@ -1,0 +1,34 @@
+#!/bin/sh
+# Git pre-push hook: keep this branch current with the base before a push.
+#
+# Install from the repo root:
+#   cp examples/pre-push .git/hooks/pre-push
+#   chmod +x .git/hooks/pre-push
+#
+# Agents should run `truce sync` before opening a PR. This hook does that
+# when a push starts. It does not pass --push, because a push is already
+# in progress. If sync creates a commit, that commit is not part of this
+# push: the hook exits 1 so you push again.
+#
+# Override the base with TRUCE_SYNC_BASE (default origin/main).
+
+set -eu
+
+base="${TRUCE_SYNC_BASE:-origin/main}"
+
+if ! command -v truce >/dev/null 2>&1; then
+  echo "truce: pre-push: truce is not on PATH" >&2
+  exit 2
+fi
+
+before=$(git rev-parse HEAD)
+truce sync --base "$base"
+after=$(git rev-parse HEAD)
+
+if [ "$before" != "$after" ]; then
+  echo "truce: synced with ${base}; HEAD is ${after}." >&2
+  echo "truce: push again so this push includes the sync commit." >&2
+  exit 1
+fi
+
+exit 0
