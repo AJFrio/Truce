@@ -223,17 +223,31 @@ pub fn summary_markdown(report: &Report) -> String {
     md
 }
 
-/// Write annotations to stderr and append the job summary if configured.
-pub fn emit(report: &Report) -> io::Result<()> {
+/// Write workflow commands to stderr.
+pub fn write_annotations(lines: &[String]) -> io::Result<()> {
     let mut err = io::stderr().lock();
-    for line in annotations(report) {
+    for line in lines {
         writeln!(err, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Append markdown to `$GITHUB_STEP_SUMMARY` when that variable is set.
+pub fn append_summary(markdown: &str) -> io::Result<()> {
+    if markdown.is_empty() {
+        return Ok(());
     }
     if let Some(path) = env::var_os("GITHUB_STEP_SUMMARY") {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        file.write_all(summary_markdown(report).as_bytes())?;
+        file.write_all(markdown.as_bytes())?;
     }
     Ok(())
+}
+
+/// Write annotations to stderr and append the job summary if configured.
+pub fn emit(report: &Report) -> io::Result<()> {
+    write_annotations(&annotations(report))?;
+    append_summary(&summary_markdown(report))
 }
 
 #[cfg(test)]

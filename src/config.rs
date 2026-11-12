@@ -73,29 +73,37 @@ impl FileConfig {
 }
 
 pub fn load(cli: &Cli, repo_root: &Path) -> Result<Settings> {
+    load_models(&cli.models, repo_root)
+}
+
+pub fn load_models(models: &crate::cli::ModelArgs, repo_root: &Path) -> Result<Settings> {
     let user = FileConfig::load_path(&user_config_path())?;
     let repo = FileConfig::load_path(&repo_root.join(".truce.toml"))?;
     let file = user.overlay(repo);
 
-    let model = first_nonempty([cli.model.clone(), env_nonempty("TRUCE_MODEL"), file.model])
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = first_nonempty([
+        models.model.clone(),
+        env_nonempty("TRUCE_MODEL"),
+        file.model,
+    ])
+    .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let code_model = first_nonempty([
-        cli.code_model.clone(),
+        models.code_model.clone(),
         env_nonempty("TRUCE_CODE_MODEL"),
         file.code_model,
     ])
     .unwrap_or_else(|| DEFAULT_CODE_MODEL.to_string());
 
     let base_url = first_nonempty([
-        cli.base_url.clone(),
+        models.base_url.clone(),
         env_nonempty("TRUCE_BASE_URL"),
         env_nonempty("OPENROUTER_BASE_URL"),
         file.base_url,
     ])
     .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
-    let min_confidence = cli
+    let min_confidence = models
         .min_confidence
         .or(env_f64("TRUCE_MIN_CONFIDENCE")?)
         .or(file.min_confidence)
@@ -106,7 +114,7 @@ pub fn load(cli: &Cli, repo_root: &Path) -> Result<Settings> {
         ));
     }
 
-    let concurrency = cli
+    let concurrency = models
         .concurrency
         .or(file.concurrency)
         .unwrap_or(DEFAULT_CONCURRENCY);
@@ -116,7 +124,7 @@ pub fn load(cli: &Cli, repo_root: &Path) -> Result<Settings> {
         ));
     }
 
-    let timeout_secs = cli
+    let timeout_secs = models
         .timeout
         .or(file.timeout_secs)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
@@ -126,7 +134,7 @@ pub fn load(cli: &Cli, repo_root: &Path) -> Result<Settings> {
         ));
     }
 
-    let retries = cli.retries.or(file.retries).unwrap_or(DEFAULT_RETRIES);
+    let retries = models.retries.or(file.retries).unwrap_or(DEFAULT_RETRIES);
 
     let api_key = env_nonempty("OPENROUTER_API_KEY");
 

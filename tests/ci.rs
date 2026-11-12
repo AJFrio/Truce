@@ -426,3 +426,89 @@ fn action_script_passes_code_model_and_min_confidence() {
     assert!(stdout.contains("code_model=custom/code"), "{stdout}");
     assert!(stdout.contains("min_confidence=0.50"), "{stdout}");
 }
+
+#[cfg(unix)]
+#[test]
+fn action_script_sync_mode_does_not_push_unless_asked() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = two_branch_repo();
+    let args_file = dir.path().join("sync-args.txt");
+    let bin = dir.path().join("fake-truce.sh");
+    fs::write(
+        &bin,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TRUCE_ARGS_FILE\"\nexit 0\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&bin).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&bin, perms).unwrap();
+
+    let output = script_cmd(dir.path())
+        .env("TRUCE_BIN", &bin)
+        .env("TRUCE_ARGS_FILE", &args_file)
+        .env("TRUCE_MODE", "sync")
+        .env("TRUCE_TARGET_BRANCH", "develop")
+        .env("TRUCE_MODEL", "custom/decision")
+        .env("TRUCE_CODE_MODEL", "custom/code")
+        .env("TRUCE_MIN_CONFIDENCE", "0.50")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = fs::read_to_string(&args_file).unwrap();
+    for flag in [
+        "sync",
+        "--ci",
+        "--base",
+        "origin/develop",
+        "--model",
+        "custom/decision",
+        "--code-model",
+        "custom/code",
+        "--min-confidence",
+        "0.50",
+    ] {
+        assert!(recorded.contains(flag), "missing {flag} in:\n{recorded}");
+    }
+    assert!(
+        !recorded.lines().any(|line| line == "--push"),
+        "push must be opt-in:\n{recorded}"
+    );
+    assert!(
+        git_allow_fail(
+            dir.path(),
+            &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]
+        )
+        .status
+        .code()
+            != Some(0),
+        "sync mode must not start a merge before truce runs"
+    );
+    let letter = fs::read_to_string(dir.path().join("letter.txt")).unwrap();
+    assert!(
+        !letter.contains("<<<<<<<"),
+        "sync mode must leave the working tree untouched:\n{letter}"
+    );
+
+    let _ = fs::remove_file(&args_file);
+    let pushed = script_cmd(dir.path())
+        .env("TRUCE_BIN", &bin)
+        .env("TRUCE_ARGS_FILE", &args_file)
+        .env("TRUCE_MODE", "sync")
+        .env("TRUCE_PUSH", "true")
+        .output()
+        .unwrap();
+    assert!(pushed.status.success(), "{pushed:?}");
+    let recorded = fs::read_to_string(&args_file).unwrap();
+    assert!(recorded.lines().any(|line| line == "--push"), "{recorded}");
+    assert!(
+        recorded.lines().any(|line| line == "origin/main"),
+        "{recorded}"
+    );
+}

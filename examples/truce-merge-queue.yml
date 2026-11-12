@@ -1,0 +1,48 @@
+# GitHub merge queue with Truce as a required check.
+# Copy into .github/workflows/ of the consuming repo.
+# This file is not active in the Truce repo.
+#
+# Required repository secret: OPENROUTER_API_KEY
+#
+# Enable the queue on the base branch (public repos, GitHub Team, Enterprise Cloud):
+#   Settings → Rules → Rulesets (or branch protection)
+#   - Require a pull request before merging
+#   - Require status checks to pass: job name `truce` (not the workflow name)
+#   - Require merge queue
+# The workflow must run on merge_group. A required check that never
+# reports on that event stalls the queue.
+#
+# Limitations:
+# - GitHub builds the group on the server. A PR that conflicts with the
+#   base is dropped before this job can edit conflict markers.
+# - truce sync merges the base in the runner and resolves conflicts that
+#   merge produces, then the tests run. Leave push false. gh-readonly-queue/*
+#   is not a branch you update.
+# - Binary, modify/delete, and rename/delete or rename/rename conflicts
+#   still fail the check.
+# - Do not checkout again before the tests; that drops the synced tree.
+
+name: truce
+
+on:
+  merge_group:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  truce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync and resolve conflicts
+        uses: AJFrio/Truce@v1
+        with:
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          mode: sync
+          push: false
+          target-branch: ${{ github.event.merge_group.base_ref || github.base_ref || 'main' }}
+
+      - name: Tests
+        run: cargo test

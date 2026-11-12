@@ -18,9 +18,17 @@ inputs:
     required: false
     default: "0.7"
   mode:
-    description: report (preview only) or commit (apply, stage, commit, push)
+    description: report (preview only), commit (apply, stage, commit, push a truce/resolve-* branch), or sync (truce sync; push is separate)
     required: false
     default: report
+  push:
+    description: In sync mode, push the synced branch to origin. Default false. Ignored for report. Commit mode pushes on its own.
+    required: false
+    default: "false"
+  verify-cmd:
+    description: In sync mode, shell command run after conflicts are resolved and before the commit. Empty skips it. A non-zero exit aborts the sync.
+    required: false
+    default: ""
   target-branch:
     description: Branch to merge into the PR head (defaults to github.base_ref)
     required: false
@@ -67,4 +75,6 @@ runs:
         TRUCE_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
         TRUCE_MODE: ${{ inputs.mode }}
         TRUCE_TARGET_BRANCH: ${{ inputs.target-branch }}
+        TRUCE_PUSH: ${{ inputs.push }}
+        TRUCE_VERIFY_CMD: ${{ inputs.verify-cmd }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/truce-action.sh"
