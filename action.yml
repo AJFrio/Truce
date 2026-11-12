@@ -6,7 +6,11 @@ branding:
 
 inputs:
   model:
-    description: OpenRouter model id (overrides TRUCE_MODEL / config)
+    description: OpenRouter System One decision model id (overrides TRUCE_MODEL and config). Default liquid/d1-ultra.
+    required: false
+    default: ""
+  code-model:
+    description: OpenRouter chat model used when a hunk needs generated code (overrides TRUCE_CODE_MODEL and config). Default ~deepseek/deepseek-flash-latest.
     required: false
     default: ""
   min-confidence:
@@ -59,6 +63,7 @@ runs:
       env:
         OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
         TRUCE_MODEL: ${{ inputs.model }}
+        TRUCE_CODE_MODEL: ${{ inputs.code-model }}
         TRUCE_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
         TRUCE_MODE: ${{ inputs.mode }}
         TRUCE_TARGET_BRANCH: ${{ inputs.target-branch }}

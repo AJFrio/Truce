@@ -75,8 +75,14 @@ pub fn truce(dir: &Path) -> Truce {
         .env("TERM", "dumb")
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("TRUCE_MODEL")
+        .env_remove("TRUCE_CODE_MODEL")
+        .env_remove("TRUCE_MIN_CONFIDENCE")
         .env_remove("TRUCE_BASE_URL")
         .env_remove("OPENROUTER_BASE_URL")
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join(format!("truce-xdg-none-{}", std::process::id())),
+        )
         .env_remove("GITHUB_ACTIONS")
         .env_remove("GITHUB_STEP_SUMMARY")
         .env_remove("GITHUB_BASE_REF");

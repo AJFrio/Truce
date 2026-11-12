@@ -20,9 +20,16 @@ Dry-run is the default: the model still runs (when OPENROUTER_API_KEY is set) \
 and a diff-style preview is printed, but nothing is written. Pass --apply to \
 write files that resolved completely. Pass --stage with --apply to `git add` \
 those files. Binary and non-UTF-8 files are skipped and reported, never rewritten.\n\n\
-Model selection: --model, then TRUCE_MODEL, then .truce.toml in the repo root, \
-then $XDG_CONFIG_HOME/truce/config.toml, then the built-in default \
-(openai/gpt-4o-mini).\n\n\
+Model selection for the decision model: --model, then TRUCE_MODEL, then \
+.truce.toml in the repo root, then $XDG_CONFIG_HOME/truce/config.toml, then \
+liquid/d1-ultra. That model is called via OpenRouter System One \
+(POST /api/v1/systemone) and returns a choice, not generated text.\n\n\
+Code model (--code-model): --code-model, then TRUCE_CODE_MODEL, then \
+.truce.toml code_model, then the user config, then \
+~deepseek/deepseek-flash-latest. A hunk escalates to this chat model when \
+the decision is needs_code, confidence is below --min-confidence, the \
+choice is unknown, the decision API errors, or the hunk does not fit the \
+32k decision context.\n\n\
 Color is used only when stdout is a TTY. It is disabled when --no-color is \
 set, when NO_COLOR is present in the environment, or when TERM=dumb. Labels \
 such as OURS/THEIRS/RESOLVED/REJECTED/SKIPPED are always printed so the \
@@ -58,11 +65,27 @@ pub struct Cli {
     #[arg(long)]
     pub stage: bool,
 
-    /// OpenRouter model id (overrides TRUCE_MODEL and config files).
+    /// OpenRouter System One decision model (overrides TRUCE_MODEL and config).
+    ///
+    /// Default: liquid/d1-ultra. Called via POST /api/v1/systemone, not chat
+    /// completions. The model returns a choice (ours, theirs, both, or
+    /// needs_code), not generated text.
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
-    /// Reject resolutions below this confidence (0–1). Default: 0.7.
+    /// Chat model used when a hunk needs generated code.
+    ///
+    /// Overrides TRUCE_CODE_MODEL and config. Default:
+    /// ~deepseek/deepseek-flash-latest. Used for needs_code, low confidence,
+    /// unknown choices, decision-API errors, and hunks that do not fit the
+    /// 32k decision context.
+    #[arg(long, value_name = "MODEL")]
+    pub code_model: Option<String>,
+
+    /// Accept a decision at or above this confidence (0–1). Default: 0.7.
+    ///
+    /// Overrides TRUCE_MIN_CONFIDENCE and config. A side choice below this
+    /// threshold escalates the hunk to the code model.
     #[arg(long, value_name = "N")]
     pub min_confidence: Option<f64>,
 
@@ -131,6 +154,9 @@ mod tests {
         assert!(help.contains("--apply"), "{help}");
         assert!(help.contains("--dry-run"), "{help}");
         assert!(help.contains("--model"), "{help}");
+        assert!(help.contains("--code-model"), "{help}");
+        assert!(help.contains("liquid/d1-ultra"), "{help}");
+        assert!(help.contains("TRUCE_CODE_MODEL"), "{help}");
         assert!(help.contains("--stage"), "{help}");
         assert!(help.contains("OPENROUTER_API_KEY"), "{help}");
         assert!(help.contains("NO_COLOR"), "{help}");

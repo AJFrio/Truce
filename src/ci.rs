@@ -106,13 +106,17 @@ pub fn annotations(report: &Report) -> Vec<String> {
             FileStatus::Conflicted => {
                 for h in &file.hunks {
                     if let Some(reason) = &h.rejection {
+                        let message = match h.escalation_reason {
+                            Some(escalation) => format!("{escalation}: {reason}"),
+                            None => reason.clone(),
+                        };
                         out.push(annotation(
                             "error",
                             &file.path,
                             h.hunk.start_line,
                             Some(h.hunk.end_line),
                             "Rejected resolution",
-                            reason,
+                            &message,
                         ));
                     } else if h.resolution.is_none() {
                         out.push(annotation(
@@ -151,7 +155,10 @@ pub fn summary_markdown(report: &Report) -> String {
         s.files_written
     ));
     if let Some(model) = &report.model {
-        md.push_str(&format!("Model: `{model}`  \n"));
+        md.push_str(&format!("Decision model: `{model}`  \n"));
+    }
+    if let Some(code) = &report.code_model {
+        md.push_str(&format!("Code model: `{code}`  \n"));
     }
     md.push_str(&format!(
         "Dry-run: **{}**  \nExit: `{}`\n\n",
@@ -170,7 +177,35 @@ pub fn summary_markdown(report: &Report) -> String {
             FileStatus::Conflicted => {
                 let rejected = file.hunks.iter().filter(|h| h.rejection.is_some()).count();
                 let resolved = file.hunks.iter().filter(|h| h.resolution.is_some()).count();
-                format!("{resolved} resolved, {rejected} rejected")
+                let decision = file
+                    .hunks
+                    .iter()
+                    .filter(|h| h.resolver == Some(crate::resolve::ResolverPath::Decision))
+                    .count();
+                let code = file
+                    .hunks
+                    .iter()
+                    .filter(|h| h.resolver == Some(crate::resolve::ResolverPath::Code))
+                    .count();
+                let mut notes = format!("{resolved} resolved, {rejected} rejected");
+                if decision + code > 0 {
+                    notes.push_str(&format!("; {decision} decision, {code} code"));
+                }
+                let mut reasons = Vec::new();
+                for hunk in &file.hunks {
+                    if let Some(reason) = hunk.escalation_reason {
+                        let label = reason.to_string();
+                        if !reasons.contains(&label) {
+                            reasons.push(label);
+                        }
+                    }
+                }
+                if !reasons.is_empty() {
+                    notes.push_str(" (");
+                    notes.push_str(&reasons.join(", "));
+                    notes.push(')');
+                }
+                notes
             }
             FileStatus::ParseError => file.error.clone().unwrap_or_else(|| "parse error".into()),
             _ => file.error.clone().unwrap_or_default(),
@@ -206,6 +241,7 @@ mod tests {
     use super::*;
     use crate::output::{FileReport, FileStatus, HunkReport, Summary};
     use crate::parse::{parse_conflicts, LineEnding};
+    use crate::resolve::EscalationReason;
 
     fn conflict_report() -> Report {
         let parsed = parse_conflicts("<<<<<<< A\n1\n=======\n2\n>>>>>>> B\n", 0).unwrap();
@@ -216,7 +252,9 @@ mod tests {
             repo_root: "/repo".into(),
             merge_in_progress: true,
             dry_run: true,
-            model: Some("openai/gpt-4o-mini".into()),
+            model: Some("liquid/d1-ultra".into()),
+            code_model: Some("~deepseek/deepseek-flash-latest".into()),
+            min_confidence: 0.7,
             files: vec![FileReport {
                 path: "src/app.rs".into(),
                 status: FileStatus::Conflicted,
@@ -227,6 +265,9 @@ mod tests {
                     hunk,
                     resolution: None,
                     rejection: None,
+                    decision: None,
+                    resolver: None,
+                    escalation_reason: None,
                 }],
             }],
             summary: Summary {
@@ -266,7 +307,24 @@ mod tests {
         assert!(md.contains("| File | Status |"), "{md}");
         assert!(md.contains("`src/app.rs`"), "{md}");
         assert!(md.contains("CONFLICTED"), "{md}");
-        assert!(md.contains("openai/gpt-4o-mini"), "{md}");
+        assert!(md.contains("liquid/d1-ultra"), "{md}");
+        assert!(md.contains("~deepseek/deepseek-flash-latest"), "{md}");
+        assert!(md.contains("Decision model:"), "{md}");
+        assert!(md.contains("Code model:"), "{md}");
+    }
+
+    #[test]
+    fn rejected_escalation_is_in_the_annotation() {
+        let mut report = conflict_report();
+        report.files[0].hunks[0].rejection = Some("confidence 0.20 below min 0.70".into());
+        report.files[0].hunks[0].resolver = Some(crate::resolve::ResolverPath::Code);
+        report.files[0].hunks[0].escalation_reason = Some(EscalationReason::LowConfidence);
+        let lines = annotations(&report);
+        assert!(lines[0].contains("low_confidence"), "{}", lines[0]);
+        assert!(lines[0].contains("confidence 0.20"), "{}", lines[0]);
+        let md = summary_markdown(&report);
+        assert!(md.contains("low_confidence"), "{md}");
+        assert!(md.contains("0 decision, 1 code"), "{md}");
     }
 
     #[test]

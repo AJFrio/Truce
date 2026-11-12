@@ -38,11 +38,11 @@ Run from anywhere inside a repository that has a merge (or rebase / cherry-pick
 / revert) in progress:
 
 ```bash
-truce                      # call the model, print a preview (dry-run)
+truce                      # call the decision model, print a preview (dry-run)
 truce --json
 truce --apply              # write files whose hunks all resolved
 truce --apply --stage      # write, then git add those files
-truce --model openai/gpt-4o-mini --min-confidence 0.8
+truce --model liquid/d1-ultra --code-model "~deepseek/deepseek-flash-latest" --min-confidence 0.8
 truce --context 5 src/
 ```
 
@@ -60,9 +60,11 @@ truce [OPTIONS] [PATH]...
   --dry-run              Preview only (default)
   --apply                Write accepted resolutions to the working tree
   --stage                git add files after a successful --apply
-  --model <MODEL>        OpenRouter model id
-  --min-confidence <N>   Reject below this confidence [default: 0.7]
-  --concurrency <N>      Max in-flight requests [default: 8]
+  --model <MODEL>        System One decision model (default: liquid/d1-ultra)
+  --code-model <MODEL>   Chat model for code escalation
+                         (default: ~deepseek/deepseek-flash-latest)
+  --min-confidence <N>   Escalate a side choice below this confidence [default: 0.7]
+  --concurrency <N>      Max in-flight hunks [default: 8]
   --timeout <SECS>       Per-request timeout [default: 30]
   --retries <N>          Retries on 429/5xx/timeouts [default: 3]
   --base-url <URL>       API base (tests / proxy)
@@ -82,24 +84,29 @@ Binary files (NUL bytes) and non-UTF-8 files are skipped and listed; they are
 never rewritten. Paths with spaces are handled. Malformed or unterminated
 conflict markers are reported as parse errors — Truce does not panic.
 
-Rejected hunks (leftover conflict markers, empty/garbage output, or confidence
-below `--min-confidence`) stay unresolved and are reported. They are never
-silently applied.
+Rejected hunks (leftover conflict markers, empty or garbage output, or a
+code-model confidence below `--min-confidence`) stay unresolved and are
+reported. A confident decision choice that fails those checks is rejected
+too. Nothing is silently applied.
 
 ## Model selection
 
-First match wins:
+`--model` selects the **decision** model. `--code-model` selects the chat
+model used only when a hunk escalates. First match wins, separately for each:
 
-1. `--model`
-2. `TRUCE_MODEL`
-3. `.truce.toml` in the repo root
-4. `$XDG_CONFIG_HOME/truce/config.toml` (or `~/.config/truce/config.toml`)
-5. Built-in default: `openai/gpt-4o-mini`
+1. CLI flag (`--model` / `--code-model` / `--min-confidence`)
+2. Environment (`TRUCE_MODEL` / `TRUCE_CODE_MODEL` / `TRUCE_MIN_CONFIDENCE`)
+3. `.truce.toml` in the repo root (`model`, `code_model`, `min_confidence`)
+4. `$XDG_CONFIG_HOME/truce/config.toml` (or `~/.config/truce/config.toml`, or `%APPDATA%\truce\config.toml` on Windows)
+5. Built-in defaults: decision `liquid/d1-ultra`, code `~deepseek/deepseek-flash-latest`, confidence `0.7`
+
+`min_confidence` must be in `0..=1`.
 
 Example `.truce.toml`:
 
 ```toml
-model = "openai/gpt-4o-mini"
+model = "liquid/d1-ultra"
+code_model = "~deepseek/deepseek-flash-latest"
 min_confidence = 0.7
 concurrency = 8
 timeout_secs = 30
@@ -108,6 +115,11 @@ retries = 3
 
 The API base URL defaults to `https://openrouter.ai/api/v1` and can be
 overridden with `--base-url`, `TRUCE_BASE_URL`, or `OPENROUTER_BASE_URL`.
+Truce posts decisions to `{base_url}/systemone` and code escalation to
+`{base_url}/chat/completions`.
+
+`OPENROUTER_API_KEY` is sent as a bearer token and is never printed, logged,
+or included in request bodies. `--apply` without a key exits 2.
 
 ## Exit codes
 
@@ -121,8 +133,10 @@ Clap usage errors (`truce --bogus`) also exit 2. `--help` and `--version` exit 0
 
 ## JSON schema (`schema_version`: 1)
 
-`--json` prints one object to stdout. Optional fields (`model`, `base`,
-`base_label`, `error`, `resolution`, `rejection`) are omitted when null.
+`--json` prints one object to stdout. Optional fields (`model`, `code_model`,
+`base`, `base_label`, `error`, `resolution`, `rejection`, `decision`,
+`resolver`, `escalation_reason`, `probabilities`) are omitted when null or
+empty.
 
 ```json
 {
@@ -131,7 +145,9 @@ Clap usage errors (`truce --bogus`) also exit 2. `--help` and `--version` exit 0
   "repo_root": "/abs/path/to/repo",
   "merge_in_progress": true,
   "dry_run": true,
-  "model": "openai/gpt-4o-mini",
+  "model": "liquid/d1-ultra",
+  "code_model": "~deepseek/deepseek-flash-latest",
+  "min_confidence": 0.7,
   "files": [
     {
       "path": "src/app.rs",
@@ -150,11 +166,23 @@ Clap usage errors (`truce --bogus`) also exit 2. `--help` and `--version` exit 0
           "context_before": ["fn start() {"],
           "context_after": ["}"],
           "resolution": {
-            "text": "boot_v2();",
-            "choice": "theirs",
-            "rationale": "feature already migrated the API",
+            "text": "boot_v1();",
+            "choice": "ours",
+            "rationale": "decision model selected ours",
             "confidence": 0.91
-          }
+          },
+          "decision": {
+            "model": "liquid/d1-ultra",
+            "choice": "ours",
+            "confidence": 0.91,
+            "probabilities": {
+              "both": 0.02,
+              "needs_code": 0.01,
+              "ours": 0.91,
+              "theirs": 0.06
+            }
+          },
+          "resolver": "decision"
         }
       ]
     }
@@ -179,9 +207,20 @@ Notes:
   `parse_error`, `unmerged_without_markers`.
 - Hunk `ours` / `theirs` / `base` / context arrays are lines **without** EOL
   characters. `line_ending` is `lf` or `crlf` for the file as a whole.
-- `choice` is `ours`, `theirs`, or `merged`.
+- `resolution.choice` is `ours`, `theirs`, or `merged`. A decision of `both`
+  is stored as `merged` because the text is the concatenation described below.
+- `decision` is the System One answer when that call returned one:
+  `model`, `choice` (`ours`, `theirs`, `both`, or `needs_code`), `confidence`,
+  and `probabilities`. It is omitted when the decision API was not called or
+  did not return a choice.
+- `resolver` is `decision` or `code`. `escalation_reason` is one of
+  `needs_code`, `low_confidence`, `unknown_choice`, `decision_error`,
+  `too_large`, and is omitted when the decision path applied the hunk.
+- `model` and `code_model` are omitted when unset. `min_confidence` is always
+  present.
 - Field order is the struct declaration order; treat names, not column
-  position, as the contract.
+  position, as the contract. `schema_version` stays `1`; the new fields are
+  additive.
 
 ## How it works
 
@@ -190,12 +229,38 @@ Notes:
    paths, NUL-separated so names with spaces round-trip.
 3. Conflict markers `<<<<<<<`, optional `|||||||` (diff3/zdiff3 base),
    `=======`, and `>>>>>>>` are parsed with a state machine.
-4. Each hunk is POSTed to `{base_url}/chat/completions` with a JSON schema
-   response format. Requests run in parallel up to `--concurrency`, with
-   jittered exponential backoff on 429/5xx/timeouts (honoring `Retry-After`).
-   Other 4xx errors are not retried.
-5. Valid resolutions are previewed as a diff. `--apply` writes atomically
-   (temp file + rename) and preserves the file's line endings.
+4. Each hunk is POSTed to `{base_url}/systemone` (OpenRouter System One).
+   The body is `model`, `state`, and one `choice` question named `resolution`
+   with options `ours`, `theirs`, `both`, and `needs_code`. There is no
+   `messages`, `temperature`, or `response_format` field. `state` carries
+   `file`, `language`, `ours`, `theirs`, optional diff3 `base`, and `context`
+   (side labels plus surrounding lines).
+5. Tokens are estimated as one per four characters. The decision budget is
+   32,768 tokens with 1,024 tokens of headroom. Context lines are dropped
+   from the outside inward (far lines first). If `ours` + `theirs` + `base`
+   still do not fit, the decision call is skipped (`too_large`).
+6. When the choice is `ours`, `theirs`, or `both` and `confidence` is at
+   least `--min-confidence`, Truce builds the replacement in Rust:
+   - `ours` / `theirs` keep that side unchanged.
+   - `both` writes every OURS line, then every THEIRS line. If both sides
+     are non-empty and the last OURS line is byte-for-byte identical to the
+     first THEIRS line, that one seam line is kept once. No other duplicates
+     are removed.
+   The result is checked for conflict markers and empty output. A failure
+   leaves the hunk unresolved; it is not sent to the code model.
+7. Otherwise the hunk escalates to `{base_url}/chat/completions` on
+   `--code-model`, with the existing JSON schema (`resolved`, `choice` of
+   `ours|theirs|merged`, `rationale`, `confidence`). Escalation reasons:
+   `needs_code`, `low_confidence` (a side choice under the threshold),
+   `unknown_choice`, `decision_error` (4xx other than 401/403, 5xx after
+   retries, timeout, or a malformed body), and `too_large`.
+8. 401/403 from either API abort the run (exit 2). 429/5xx/timeouts use
+   jittered exponential backoff and honor `Retry-After`. Other 4xx responses
+   are not retried. Requests run in parallel up to `--concurrency` (one
+   permit per hunk, which may make both calls).
+9. Valid resolutions are previewed as a diff. `--apply` writes atomically
+   (temp file + rename) and preserves the file's line endings. A file is
+   written only when every hunk in it validated.
 
 ## GitHub Actions
 
@@ -212,7 +277,8 @@ A composite action lives at the repository root (`action.yml`). Copy
   with:
     openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
     mode: report          # or commit
-    # model: openai/gpt-4o-mini
+    # model: liquid/d1-ultra
+    # code-model: "~deepseek/deepseek-flash-latest"
     # min-confidence: "0.7"
     # target-branch: main
 ```
@@ -221,8 +287,9 @@ A composite action lives at the repository root (`action.yml`). Copy
 | --- | --- | --- |
 | `openrouter-api-key` | required | Pass `secrets.OPENROUTER_API_KEY`. Never echoed. |
 | `mode` | `report` | `report` previews; `commit` applies, stages, commits, and pushes a `truce/resolve-*` branch **only when every conflict resolved** (truce exit 0). A clean merge exits 0 without pushing. Unresolved hunks skip commit/push and keep truce's exit code. |
-| `model` | config / `openai/gpt-4o-mini` | OpenRouter model id. |
-| `min-confidence` | `0.7` | Reject below this confidence. |
+| `model` | config / `liquid/d1-ultra` | System One decision model id. |
+| `code-model` | config / `~deepseek/deepseek-flash-latest` | Chat model for `needs_code`, low confidence, decision errors, and oversize hunks. |
+| `min-confidence` | `0.7` | Escalate a side choice below this confidence. |
 | `target-branch` | `github.base_ref` | Branch merged into the PR head before Truce runs. |
 | `github-token` | `github.token` | Checkout (and push in commit mode). |
 

@@ -1,5 +1,9 @@
 //! Truce: find, parse, and resolve git merge conflicts in a working tree.
 
+mod engine;
+mod systemone;
+mod transport;
+
 pub mod ci;
 pub mod cli;
 pub mod config;
@@ -19,10 +23,9 @@ pub use error::{Result, TruceError};
 pub use parse::{parse_conflicts, Hunk, LineEnding, ParsedFile};
 
 use git::{filter_paths, GitRepo};
-use openrouter::OpenRouterClient;
 use output::{ignore_broken_pipe, print_report, FileScan, FileStatus, Report};
 use parse::LineEnding as Eol;
-use resolve::{reconstruct, write_atomic, HunkOutcome, Resolution};
+use resolve::{reconstruct, write_atomic, AttemptInfo, HunkOutcome, Resolution};
 
 /// Run truce with an already-parsed CLI. Returns the process exit code.
 pub async fn run(cli: Cli) -> Result<i32> {
@@ -53,14 +56,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
                 }
             }
             Some(_) => {
-                let client = OpenRouterClient::new(&settings)?;
-                openrouter::resolve_scans(
-                    &mut scans,
-                    &client,
-                    settings.concurrency,
-                    settings.min_confidence,
-                )
-                .await?;
+                engine::resolve_scans(&mut scans, &settings).await?;
             }
         }
     }
@@ -83,6 +79,8 @@ pub async fn run(cli: Cli) -> Result<i32> {
         merge_in_progress,
         dry_run,
         Some(settings.model),
+        Some(settings.code_model),
+        settings.min_confidence,
         &scans,
         files_written,
         files_staged,
@@ -109,6 +107,7 @@ fn scan_file(repo_root: &Path, rel: PathBuf, context: usize) -> Result<FileScan>
             hunks: Vec::new(),
             error: Some("working-tree file is missing".into()),
             outcomes: Vec::new(),
+            attempts: Vec::new(),
         }),
         Err(source) => Err(TruceError::Read { path: abs, source }),
     }
@@ -152,6 +151,7 @@ fn classify_bytes(rel: PathBuf, bytes: Vec<u8>, context: usize) -> Result<FileSc
                     _ => None,
                 },
                 outcomes: vec![HunkOutcome::Unresolved; n],
+                attempts: vec![AttemptInfo::default(); n],
             })
         }
         Err(message) => {
@@ -165,6 +165,7 @@ fn classify_bytes(rel: PathBuf, bytes: Vec<u8>, context: usize) -> Result<FileSc
                 hunks: Vec::new(),
                 error: Some(message),
                 outcomes: Vec::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -180,6 +181,7 @@ fn skipped(rel: PathBuf, status: FileStatus, reason: &str) -> FileScan {
         hunks: Vec::new(),
         error: Some(reason.to_string()),
         outcomes: Vec::new(),
+        attempts: Vec::new(),
     }
 }
 

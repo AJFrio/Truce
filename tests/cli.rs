@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::{git, git_allow_fail, init_repo, mid_merge_repo, truce, write};
+use common::{git, git_allow_fail, init_repo, mid_merge_repo, single_conflict_repo, truce, write};
 use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -20,6 +20,8 @@ fn help_lists_exit_codes() {
         .stdout(predicate::str::contains("--json"))
         .stdout(predicate::str::contains("--apply"))
         .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--code-model"))
+        .stdout(predicate::str::contains("liquid/d1-ultra"))
         .stdout(predicate::str::contains("--stage"))
         .stdout(predicate::str::contains("--ci"));
 }
@@ -248,4 +250,105 @@ fn repo_root_is_absolute() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     let root = PathBuf::from(report["repo_root"].as_str().unwrap());
     assert!(root.is_absolute());
+    let canonical = root.canonicalize().unwrap();
+    assert_eq!(canonical, dir.path().canonicalize().unwrap());
+}
+
+fn close_enough(value: &Value, expected: f64) {
+    let got = value
+        .as_f64()
+        .unwrap_or_else(|| panic!("not a number: {value}"));
+    assert!((got - expected).abs() < 1e-9, "{got} != {expected}");
+}
+
+#[test]
+fn code_model_and_min_confidence_precedence() {
+    let dir = single_conflict_repo();
+    let root = dir.path();
+
+    let mut cmd = truce(root);
+    let report = json_report(&mut cmd);
+    assert_eq!(report["model"], "liquid/d1-ultra");
+    assert_eq!(report["code_model"], "~deepseek/deepseek-flash-latest");
+    close_enough(&report["min_confidence"], 0.7);
+
+    let xdg = root.join("xdg-user");
+    fs::create_dir_all(xdg.join("truce")).unwrap();
+    fs::write(
+        xdg.join("truce").join("config.toml"),
+        "model = \"user/dec\"\ncode_model = \"user/code\"\nmin_confidence = 0.2\n",
+    )
+    .unwrap();
+
+    let mut cmd = truce(root);
+    cmd.env("XDG_CONFIG_HOME", &xdg);
+    let report = json_report(&mut cmd);
+    assert_eq!(report["model"], "user/dec");
+    assert_eq!(report["code_model"], "user/code");
+    close_enough(&report["min_confidence"], 0.2);
+
+    fs::write(
+        root.join(".truce.toml"),
+        "model = \"repo/dec\"\ncode_model = \"repo/code\"\nmin_confidence = 0.3\n",
+    )
+    .unwrap();
+    let mut cmd = truce(root);
+    cmd.env("XDG_CONFIG_HOME", &xdg);
+    let report = json_report(&mut cmd);
+    assert_eq!(report["model"], "repo/dec");
+    assert_eq!(report["code_model"], "repo/code");
+    close_enough(&report["min_confidence"], 0.3);
+
+    let mut cmd = truce(root);
+    cmd.env("XDG_CONFIG_HOME", &xdg)
+        .env("TRUCE_MODEL", "env/dec")
+        .env("TRUCE_CODE_MODEL", "env/code")
+        .env("TRUCE_MIN_CONFIDENCE", "0.4");
+    let report = json_report(&mut cmd);
+    assert_eq!(report["model"], "env/dec");
+    assert_eq!(report["code_model"], "env/code");
+    close_enough(&report["min_confidence"], 0.4);
+
+    let mut cmd = truce(root);
+    cmd.env("XDG_CONFIG_HOME", &xdg)
+        .env("TRUCE_MODEL", "env/dec")
+        .env("TRUCE_CODE_MODEL", "env/code")
+        .env("TRUCE_MIN_CONFIDENCE", "0.4")
+        .args([
+            "--model",
+            "cli/dec",
+            "--code-model",
+            "cli/code",
+            "--min-confidence",
+            "0.6",
+        ]);
+    let report = json_report(&mut cmd);
+    assert_eq!(report["model"], "cli/dec");
+    assert_eq!(report["code_model"], "cli/code");
+    close_enough(&report["min_confidence"], 0.6);
+
+    let bad = truce(root)
+        .env("TRUCE_MIN_CONFIDENCE", "1.5")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        err.contains("0 and 1") || err.contains("TRUCE_MIN_CONFIDENCE"),
+        "{err}"
+    );
+    assert!(!err.contains("1.5 is a secret"));
+}
+
+fn json_report(cmd: &mut assert_cmd::Command) -> Value {
+    let output = cmd.arg("--json").output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("{err}: {stdout}"))
 }

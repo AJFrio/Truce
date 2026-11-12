@@ -24,7 +24,8 @@ jobs:
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           mode: report
-          # model: openai/gpt-4o-mini
+          # model: liquid/d1-ultra
+          # code-model: "~deepseek/deepseek-flash-latest"
           # min-confidence: "0.7"
           # target-branch: main
 

@@ -10,6 +10,7 @@ target="${TRUCE_TARGET_BRANCH:-}"
 bin="${TRUCE_BIN:-truce}"
 min_conf="${TRUCE_MIN_CONFIDENCE:-}"
 model="${TRUCE_MODEL:-}"
+code_model="${TRUCE_CODE_MODEL:-}"
 
 if [[ "${OPENROUTER_API_KEY:-}" == *[[:space:]]* ]]; then
   echo "error: OPENROUTER_API_KEY must not contain whitespace" >&2
@@ -71,6 +72,9 @@ fi
 args=(--ci --no-color)
 if [[ -n "$model" ]]; then
   args+=(--model "$model")
+fi
+if [[ -n "$code_model" ]]; then
+  args+=(--code-model "$code_model")
 fi
 if [[ -n "$min_conf" ]]; then
   args+=(--min-confidence "$min_conf")

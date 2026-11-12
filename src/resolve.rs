@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::Write;
@@ -26,6 +27,66 @@ impl fmt::Display for Choice {
             Self::Merged => "merged",
         })
     }
+}
+
+/// Which API produced the applied text, or attempted to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolverPath {
+    /// System One choice applied deterministically in Rust.
+    Decision,
+    /// Chat completions on the code model.
+    Code,
+}
+
+impl fmt::Display for ResolverPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Decision => "decision",
+            Self::Code => "code",
+        })
+    }
+}
+
+/// Why a hunk was sent to the code model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationReason {
+    NeedsCode,
+    LowConfidence,
+    DecisionError,
+    UnknownChoice,
+    TooLarge,
+}
+
+impl fmt::Display for EscalationReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NeedsCode => "needs_code",
+            Self::LowConfidence => "low_confidence",
+            Self::DecisionError => "decision_error",
+            Self::UnknownChoice => "unknown_choice",
+            Self::TooLarge => "too_large",
+        })
+    }
+}
+
+/// System One answer recorded on a hunk, including when it was not applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionInfo {
+    pub model: String,
+    pub choice: String,
+    pub confidence: f64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub probabilities: BTreeMap<String, f64>,
+}
+
+/// Per-hunk record of which path ran. Absent fields are omitted from JSON.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AttemptInfo {
+    pub decision: Option<DecisionInfo>,
+    pub resolver: Option<ResolverPath>,
+    pub escalation_reason: Option<EscalationReason>,
 }
 
 impl Choice {
@@ -194,6 +255,71 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     result
 }
 
+/// Build resolved text for a confident `ours`, `theirs`, or `both` decision.
+///
+/// * `ours` — the OURS lines, unchanged.
+/// * `theirs` — the THEIRS lines, unchanged.
+/// * `both` ([`Choice::Merged`]) — OURS lines, then THEIRS lines. When both
+///   sides are non-empty and the last OURS line is byte-for-byte identical
+///   to the first THEIRS line, that shared seam line is emitted once (the
+///   OURS copy is kept). No other lines are removed: duplicates away from
+///   the seam stay, and lines that differ only by whitespace stay. An empty
+///   side contributes nothing.
+///
+/// Lines are joined so a trailing blank line survives hunk reconstruction
+/// (a single trailing newline is the line terminator, not an empty line).
+/// The caller must run [`validate_resolution`] before applying the text.
+pub fn materialize_choice(choice: Choice, ours: &[String], theirs: &[String]) -> (String, String) {
+    match choice {
+        Choice::Ours => (
+            join_resolution_lines(ours),
+            "decision model selected ours".into(),
+        ),
+        Choice::Theirs => (
+            join_resolution_lines(theirs),
+            "decision model selected theirs".into(),
+        ),
+        Choice::Merged => {
+            let (lines, dropped) = concat_both(ours, theirs);
+            let rationale = if dropped {
+                "decision model selected both: ours then theirs, dropping one identical seam line"
+            } else {
+                "decision model selected both: ours then theirs"
+            };
+            (join_resolution_lines(&lines), rationale.into())
+        }
+    }
+}
+
+fn concat_both(ours: &[String], theirs: &[String]) -> (Vec<String>, bool) {
+    if ours.is_empty() {
+        return (theirs.to_vec(), false);
+    }
+    if theirs.is_empty() {
+        return (ours.to_vec(), false);
+    }
+    let dropped = ours.last() == theirs.first();
+    let mut lines = ours.to_vec();
+    if dropped {
+        lines.extend_from_slice(&theirs[1..]);
+    } else {
+        lines.extend_from_slice(theirs);
+    }
+    (lines, dropped)
+}
+
+/// Inverse of reconstruction's line split for a list of resolved lines.
+fn join_resolution_lines(lines: &[String]) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut text = lines.join("\n");
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        text.push('\n');
+    }
+    text
+}
+
 /// Accept a model payload or return a user-facing rejection reason.
 pub fn validate_resolution(
     text: String,
@@ -322,6 +448,44 @@ mod tests {
         let mut resolver = NullResolver;
         let got = resolver.resolve("f.txt", &parsed.hunks[0]).unwrap();
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn both_drops_only_the_identical_seam_line() {
+        let ours = vec!["alpha".into(), "shared".into()];
+        let theirs = vec!["shared".into(), "beta".into()];
+        let (text, rationale) = materialize_choice(Choice::Merged, &ours, &theirs);
+        assert_eq!(text, "alpha\nshared\nbeta");
+        assert!(rationale.contains("seam"), "{rationale}");
+
+        let (same, rationale) =
+            materialize_choice(Choice::Merged, &["only".into()], &["only".into()]);
+        assert_eq!(same, "only");
+        assert!(rationale.contains("seam"), "{rationale}");
+    }
+
+    #[test]
+    fn both_keeps_non_seam_duplicates_and_whitespace() {
+        let ours = vec!["alpha".into(), "shared".into()];
+        let theirs = vec!["shared ".into(), "alpha".into()];
+        let (text, rationale) = materialize_choice(Choice::Merged, &ours, &theirs);
+        assert_eq!(text, "alpha\nshared\nshared \nalpha");
+        assert!(!rationale.contains("dropping"), "{rationale}");
+
+        let (empty_side, _) = materialize_choice(Choice::Merged, &[], &["beta".into()]);
+        assert_eq!(empty_side, "beta");
+    }
+
+    #[test]
+    fn trailing_blank_line_survives_reconstruction() {
+        let text = "keep\n<<<<<<< HEAD\nalpha\n\n=======\nbeta\n>>>>>>> x\nend\n";
+        let parsed = parse_conflicts(text, 0).unwrap();
+        let (resolved, _) =
+            materialize_choice(Choice::Ours, &parsed.hunks[0].ours, &parsed.hunks[0].theirs);
+        let out = reconstruct(&parsed, &[Some(res(&resolved))])
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, "keep\nalpha\n\nend\n");
     }
 
     #[test]

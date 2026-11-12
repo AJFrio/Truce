@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
 use crate::parse::{Hunk, LineEnding};
-use crate::resolve::{HunkOutcome, Resolution};
+use crate::resolve::{
+    AttemptInfo, DecisionInfo, EscalationReason, HunkOutcome, Resolution, ResolverPath,
+};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -64,6 +66,15 @@ pub struct HunkReport {
     pub resolution: Option<Resolution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection: Option<String>,
+    /// System One answer, when the decision API returned one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionInfo>,
+    /// `decision` when Rust applied a choice, `code` when chat completions ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolver: Option<ResolverPath>,
+    /// Why this hunk was sent to the code model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation_reason: Option<EscalationReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +98,10 @@ pub struct Report {
     pub dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Chat model used for code-generation escalation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_model: Option<String>,
+    pub min_confidence: f64,
     pub files: Vec<FileReport>,
     pub summary: Summary,
 }
@@ -102,6 +117,7 @@ pub struct FileScan {
     pub hunks: Vec<Hunk>,
     pub error: Option<String>,
     pub outcomes: Vec<HunkOutcome>,
+    pub attempts: Vec<AttemptInfo>,
 }
 
 impl FileScan {
@@ -116,10 +132,17 @@ impl FileScan {
                 .hunks
                 .iter()
                 .zip(self.outcomes.iter())
-                .map(|(hunk, outcome)| HunkReport {
-                    hunk: hunk.clone(),
-                    resolution: outcome.resolution().cloned(),
-                    rejection: outcome.rejection().map(str::to_string),
+                .enumerate()
+                .map(|(index, (hunk, outcome))| {
+                    let attempt = self.attempts.get(index).cloned().unwrap_or_default();
+                    HunkReport {
+                        hunk: hunk.clone(),
+                        resolution: outcome.resolution().cloned(),
+                        rejection: outcome.rejection().map(str::to_string),
+                        decision: attempt.decision,
+                        resolver: attempt.resolver,
+                        escalation_reason: attempt.escalation_reason,
+                    }
                 })
                 .collect(),
         }
@@ -136,11 +159,14 @@ impl FileScan {
 }
 
 impl Report {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_scans(
         repo_root: &std::path::Path,
         merge_in_progress: bool,
         dry_run: bool,
         model: Option<String>,
+        code_model: Option<String>,
+        min_confidence: f64,
         scans: &[FileScan],
         files_written: usize,
         files_staged: usize,
@@ -172,6 +198,8 @@ impl Report {
             merge_in_progress,
             dry_run,
             model,
+            code_model,
+            min_confidence,
             files,
             summary: Summary {
                 conflicted_files,
@@ -305,6 +333,13 @@ fn write_human(out: &mut dyn Write, report: &Report, color: bool) -> io::Result<
         yes_no(report.dry_run),
         report.repo_root
     )?;
+    if let Some(model) = &report.model {
+        writeln!(out, "decision_model={model}")?;
+    }
+    if let Some(code) = &report.code_model {
+        writeln!(out, "code_model={code}")?;
+    }
+    writeln!(out, "min_confidence={:.2}", report.min_confidence)?;
     writeln!(out)?;
 
     if report.files.is_empty() {
@@ -355,13 +390,20 @@ fn write_human(out: &mut dyn Write, report: &Report, color: bool) -> io::Result<
                 hunk.id, hunk.start_line, hunk.end_line
             )?;
             if let Some(res) = &h.resolution {
-                writeln!(
+                write!(
                     out,
                     "    {}  choice={}  confidence={:.2}",
                     p.resolved("RESOLVED"),
                     res.choice,
                     res.confidence
                 )?;
+                if let Some(resolver) = h.resolver {
+                    write!(out, "  resolver={resolver}")?;
+                }
+                if let Some(reason) = h.escalation_reason {
+                    write!(out, "  escalation={reason}")?;
+                }
+                writeln!(out)?;
                 if !res.rationale.trim().is_empty() {
                     writeln!(out, "    rationale: {}", res.rationale.trim())?;
                 }
@@ -386,7 +428,14 @@ fn write_human(out: &mut dyn Write, report: &Report, color: bool) -> io::Result<
                 )?;
                 write_block(out, "    ", &hunk.theirs)?;
                 if let Some(reason) = &h.rejection {
-                    writeln!(out, "    {}  {reason}", p.rejected("REJECTED"))?;
+                    write!(out, "    {}", p.rejected("REJECTED"))?;
+                    if let Some(resolver) = h.resolver {
+                        write!(out, "  resolver={resolver}")?;
+                    }
+                    if let Some(escalation) = h.escalation_reason {
+                        write!(out, "  escalation={escalation}")?;
+                    }
+                    writeln!(out, "  {reason}")?;
                 }
             }
         }
@@ -510,8 +559,17 @@ mod tests {
 
     #[test]
     fn exit_zero_when_empty() {
-        let report =
-            Report::from_scans(std::path::Path::new("/repo"), false, true, None, &[], 0, 0);
+        let report = Report::from_scans(
+            std::path::Path::new("/repo"),
+            false,
+            true,
+            None,
+            None,
+            0.7,
+            &[],
+            0,
+            0,
+        );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.schema_version, 1);
     }
@@ -526,6 +584,7 @@ mod tests {
             trailing_newline: parsed.trailing_newline,
             lines: parsed.lines,
             outcomes: vec![HunkOutcome::Unresolved],
+            attempts: Vec::new(),
             hunks: parsed.hunks,
             error: None,
         };
@@ -534,6 +593,8 @@ mod tests {
             true,
             true,
             None,
+            None,
+            0.7,
             &[scan],
             0,
             0,
@@ -553,6 +614,7 @@ mod tests {
             trailing_newline: parsed.trailing_newline,
             lines: parsed.lines,
             outcomes: vec![HunkOutcome::Unresolved],
+            attempts: Vec::new(),
             hunks: parsed.hunks,
             error: None,
         };
@@ -561,6 +623,8 @@ mod tests {
             true,
             true,
             None,
+            None,
+            0.7,
             &[scan],
             0,
             0,
