@@ -1,44 +1,24 @@
 # Truce
 
-Resolve git merge conflicts using fast System One decision models.
+Resolve git merge conflicts with a fast decision model.
 
-`truce` is a Rust CLI that you run inside a git working tree. It finds unmerged
-files, parses each conflict hunk (including optional diff3 / zdiff3 base
-sections), sends each hunk to an OpenRouter decision model, and either prints a
-diff-style preview or writes the resolution.
+`truce` runs inside a git work tree. It finds unmerged files, parses each conflict hunk (including an optional diff3 / zdiff3 base), asks an OpenRouter decision model, and prints a preview or writes the resolution.
 
 ## Install
 
-From a clone of this repository:
-
 ```bash
-cargo install --path .
-```
-
-From git without cloning:
-
-```bash
+cargo install --path .   # from a clone
 cargo install --git https://github.com/AJFrio/Truce --locked
 ```
 
-Requires Rust 1.80 or newer (see `rust-version` in `Cargo.toml`). `git` must be
-on `PATH`. Prebuilt binaries for Linux, macOS, and Windows are attached to
-[GitHub Releases](https://github.com/AJFrio/Truce/releases) (checksums in
-`SHA256SUMS`).
+Requires Rust 1.80+ (`rust-version` in `Cargo.toml`) and `git` on `PATH`. Prebuilt Linux, macOS, and Windows binaries are on [GitHub Releases](https://github.com/AJFrio/Truce/releases), with checksums in `SHA256SUMS`.
 
 ## Usage
 
-Export an OpenRouter key (Truce never prints it):
-
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
-```
+export OPENROUTER_API_KEY=sk-or-...   # never printed
 
-Run from anywhere inside a repository that has a merge (or rebase / cherry-pick
-/ revert) in progress:
-
-```bash
-truce                      # call the decision model, print a preview (dry-run)
+truce                      # preview (default)
 truce --json
 truce --apply              # write files whose hunks all resolved
 truce --apply --stage      # write, then git add those files
@@ -46,63 +26,36 @@ truce --model liquid/d1-ultra --code-model "~deepseek/deepseek-flash-latest" --m
 truce --context 5 src/
 ```
 
-`--dry-run` is the default: the model still runs when a key is set, but files
-are not modified. A file is rewritten only when **every** hunk in it resolved
-validly. Truce never runs `git add` unless you pass `--stage`.
-
-Without `OPENROUTER_API_KEY`, `truce` lists hunks and does not call a model.
-`--apply` without a key exits 2.
+Run during a merge, rebase, cherry-pick, or revert. `--dry-run` is the default: with a key, the model runs and files stay unchanged. A file is rewritten only when every hunk in it resolved. `git add` runs only with `--stage`. With no key, `truce` lists hunks and skips the model; `--apply` then exits 2.
 
 ```
 truce [OPTIONS] [PATH]...
 
-  --json                 JSON report on stdout (schema_version 1)
+  --json                 JSON report (schema_version 1)
   --dry-run              Preview only (default)
-  --apply                Write accepted resolutions to the working tree
-  --stage                git add files after a successful --apply
-  --model <MODEL>        System One decision model (default: liquid/d1-ultra)
-  --code-model <MODEL>   Chat model for code escalation
+  --apply                Write accepted resolutions
+  --stage                git add after a successful --apply
+  --model <MODEL>        Decision model (default: liquid/d1-ultra)
+  --code-model <MODEL>   Chat model for escalation
                          (default: ~deepseek/deepseek-flash-latest)
-  --min-confidence <N>   Escalate a side choice below this confidence [default: 0.7]
-  --concurrency <N>      Max in-flight hunks [default: 8]
-  --timeout <SECS>       Per-request timeout [default: 30]
-  --retries <N>          Retries on 429/5xx/timeouts [default: 3]
+  --min-confidence <N>   Escalate a side choice below this (default: 0.7)
+  --concurrency <N>      Max in-flight hunks (default: 8)
+  --timeout <SECS>       Per-request timeout (default: 30)
+  --retries <N>          Retries on 429/5xx/timeouts (default: 3)
   --base-url <URL>       API base (tests / proxy)
-  --context <N>          Surrounding context lines per hunk [default: 3]
-  --no-color             Disable ANSI color even on a TTY
+  --context <N>          Context lines per hunk (default: 3)
+  --no-color             Disable ANSI color
   --ci                   GitHub Actions mode (also auto-detected)
-  PATH                   Limit scanning to these files or directories
+  PATH                   Limit scanning to these paths
 ```
 
-Human output is colorized only when stdout is a TTY. Color is disabled if you
-pass `--no-color` or `--ci`, if `GITHUB_ACTIONS=true`, if `NO_COLOR` is set, or
-if `TERM=dumb`. Status words such as `OURS`, `THEIRS`, `BASE`, `CONFLICTED`,
-`SKIPPED`, `RESOLVED`, and `REJECTED` are always printed, so the report does
-not depend on color.
+Color is on when stdout is a TTY, and off with `--no-color`, `--ci`, `GITHUB_ACTIONS=true`, `NO_COLOR`, or `TERM=dumb`. Status words (`OURS`, `THEIRS`, `BASE`, `CONFLICTED`, `SKIPPED`, `RESOLVED`, `REJECTED`) are always printed.
 
-Binary files (NUL bytes) and non-UTF-8 files are skipped and listed; they are
-never rewritten. Paths with spaces are handled. Malformed or unterminated
-conflict markers are reported as parse errors — Truce does not panic.
+Binary and non-UTF-8 files are skipped and left unchanged. Malformed markers are parse errors. A rejected hunk — leftover markers, empty or garbage output, or code-model confidence below `--min-confidence` — stays unresolved, including when a confident decision fails those checks.
 
-Rejected hunks (leftover conflict markers, empty or garbage output, or a
-code-model confidence below `--min-confidence`) stay unresolved and are
-reported. A confident decision choice that fails those checks is rejected
-too. Nothing is silently applied.
+## Configuration
 
-## Model selection
-
-`--model` selects the **decision** model. `--code-model` selects the chat
-model used only when a hunk escalates. First match wins, separately for each:
-
-1. CLI flag (`--model` / `--code-model` / `--min-confidence`)
-2. Environment (`TRUCE_MODEL` / `TRUCE_CODE_MODEL` / `TRUCE_MIN_CONFIDENCE`)
-3. `.truce.toml` in the repo root (`model`, `code_model`, `min_confidence`)
-4. `$XDG_CONFIG_HOME/truce/config.toml` (or `~/.config/truce/config.toml`, or `%APPDATA%\truce\config.toml` on Windows)
-5. Built-in defaults: decision `liquid/d1-ultra`, code `~deepseek/deepseek-flash-latest`, confidence `0.7`
-
-`min_confidence` must be in `0..=1`.
-
-Example `.truce.toml`:
+First match wins, separately for the decision model, code model, and `min_confidence`: CLI flag, then `TRUCE_MODEL` / `TRUCE_CODE_MODEL` / `TRUCE_MIN_CONFIDENCE`, then `.truce.toml` in the repo root, then `$XDG_CONFIG_HOME/truce/config.toml` (`~/.config/truce/config.toml`, or `%APPDATA%\truce\config.toml` on Windows), then the built-in defaults. `min_confidence` must be in `0..=1`.
 
 ```toml
 model = "liquid/d1-ultra"
@@ -113,30 +66,19 @@ timeout_secs = 30
 retries = 3
 ```
 
-The API base URL defaults to `https://openrouter.ai/api/v1` and can be
-overridden with `--base-url`, `TRUCE_BASE_URL`, or `OPENROUTER_BASE_URL`.
-Truce posts decisions to `{base_url}/systemone` and code escalation to
-`{base_url}/chat/completions`.
-
-`OPENROUTER_API_KEY` is sent as a bearer token and is never printed, logged,
-or included in request bodies. `--apply` without a key exits 2.
+The API base defaults to `https://openrouter.ai/api/v1` (`--base-url`, `TRUCE_BASE_URL`, or `OPENROUTER_BASE_URL`). Decisions post to `{base}/systemone`; escalation posts to `{base}/chat/completions`. The key is a bearer token and is never printed, logged, or included in request bodies.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | No conflicts, or every conflict was resolved |
-| 1 | Unresolved conflicts remain (including skipped binaries) |
-| 2 | Usage error or runtime failure (not a git repo, parse error, missing key on `--apply`, auth failure, IO, …) |
+| 0 | No conflicts, or every conflict was resolved. `--help` and `--version` also exit 0. |
+| 1 | Unresolved conflicts remain, including skipped binaries |
+| 2 | Usage or runtime failure (not a git repo, parse error, missing key on `--apply`, auth failure, IO) |
 
-Clap usage errors (`truce --bogus`) also exit 2. `--help` and `--version` exit 0.
+## JSON (`schema_version` 1)
 
-## JSON schema (`schema_version`: 1)
-
-`--json` prints one object to stdout. Optional fields (`model`, `code_model`,
-`base`, `base_label`, `error`, `resolution`, `rejection`, `decision`,
-`resolver`, `escalation_reason`, `probabilities`) are omitted when null or
-empty.
+`--json` prints one object. Optional fields are omitted when null or empty: `model`, `code_model`, `base`, `base_label`, `error`, `resolution`, `rejection`, `decision`, `resolver`, `escalation_reason`, `probabilities`. Field names are the contract. `schema_version` stays `1`.
 
 ```json
 {
@@ -175,12 +117,7 @@ empty.
             "model": "liquid/d1-ultra",
             "choice": "ours",
             "confidence": 0.91,
-            "probabilities": {
-              "both": 0.02,
-              "needs_code": 0.01,
-              "ours": 0.91,
-              "theirs": 0.06
-            }
+            "probabilities": {"both": 0.02, "needs_code": 0.01, "ours": 0.91, "theirs": 0.06}
           },
           "resolver": "decision"
         }
@@ -200,106 +137,44 @@ empty.
 }
 ```
 
-Notes:
+- `path` is repo-relative and uses `/`. `status` is `conflicted`, `binary`, `non_utf8`, `missing`, `parse_error`, or `unmerged_without_markers`.
+- Hunk line arrays omit EOL characters. `line_ending` is `lf` or `crlf`.
+- `resolution.choice` is `ours`, `theirs`, or `merged`. A decision of `both` is stored as `merged`.
+- `decision` is the System One answer (`choice`: `ours`, `theirs`, `both`, or `needs_code`) when that call returned one.
+- `resolver` is `decision` or `code`. `escalation_reason` is `needs_code`, `low_confidence`, `unknown_choice`, `decision_error`, or `too_large`, and is omitted when the decision path applied the hunk.
+- `min_confidence` is always present.
 
-- `path` is repository-relative with `/` separators.
-- `status` is one of `conflicted`, `binary`, `non_utf8`, `missing`,
-  `parse_error`, `unmerged_without_markers`.
-- Hunk `ours` / `theirs` / `base` / context arrays are lines **without** EOL
-  characters. `line_ending` is `lf` or `crlf` for the file as a whole.
-- `resolution.choice` is `ours`, `theirs`, or `merged`. A decision of `both`
-  is stored as `merged` because the text is the concatenation described below.
-- `decision` is the System One answer when that call returned one:
-  `model`, `choice` (`ours`, `theirs`, `both`, or `needs_code`), `confidence`,
-  and `probabilities`. It is omitted when the decision API was not called or
-  did not return a choice.
-- `resolver` is `decision` or `code`. `escalation_reason` is one of
-  `needs_code`, `low_confidence`, `unknown_choice`, `decision_error`,
-  `too_large`, and is omitted when the decision path applied the hunk.
-- `model` and `code_model` are omitted when unset. `min_confidence` is always
-  present.
-- Field order is the struct declaration order; treat names, not column
-  position, as the contract. `schema_version` stays `1`; the new fields are
-  additive.
+## Resolution
 
-## How it works
-
-1. `git rev-parse --show-toplevel` — must be inside a work tree.
-2. `git ls-files -z -u` and `git diff -z --name-only --diff-filter=U` — unmerged
-   paths, NUL-separated so names with spaces round-trip.
-3. Conflict markers `<<<<<<<`, optional `|||||||` (diff3/zdiff3 base),
-   `=======`, and `>>>>>>>` are parsed with a state machine.
-4. Each hunk is POSTed to `{base_url}/systemone` (OpenRouter System One).
-   The body is `model`, `state`, and one `choice` question named `resolution`
-   with options `ours`, `theirs`, `both`, and `needs_code`. There is no
-   `messages`, `temperature`, or `response_format` field. `state` carries
-   `file`, `language`, `ours`, `theirs`, optional diff3 `base`, and `context`
-   (side labels plus surrounding lines).
-5. Tokens are estimated as one per four characters. The decision budget is
-   32,768 tokens with 1,024 tokens of headroom. Context lines are dropped
-   from the outside inward (far lines first). If `ours` + `theirs` + `base`
-   still do not fit, the decision call is skipped (`too_large`).
-6. When the choice is `ours`, `theirs`, or `both` and `confidence` is at
-   least `--min-confidence`, Truce builds the replacement in Rust:
-   - `ours` / `theirs` keep that side unchanged.
-   - `both` writes every OURS line, then every THEIRS line. If both sides
-     are non-empty and the last OURS line is byte-for-byte identical to the
-     first THEIRS line, that one seam line is kept once. No other duplicates
-     are removed.
-   The result is checked for conflict markers and empty output. A failure
-   leaves the hunk unresolved; it is not sent to the code model.
-7. Otherwise the hunk escalates to `{base_url}/chat/completions` on
-   `--code-model`, with the existing JSON schema (`resolved`, `choice` of
-   `ours|theirs|merged`, `rationale`, `confidence`). Escalation reasons:
-   `needs_code`, `low_confidence` (a side choice under the threshold),
-   `unknown_choice`, `decision_error` (4xx other than 401/403, 5xx after
-   retries, timeout, or a malformed body), and `too_large`.
-8. 401/403 from either API abort the run (exit 2). 429/5xx/timeouts use
-   jittered exponential backoff and honor `Retry-After`. Other 4xx responses
-   are not retried. Requests run in parallel up to `--concurrency` (one
-   permit per hunk, which may make both calls).
-9. Valid resolutions are previewed as a diff. `--apply` writes atomically
-   (temp file + rename) and preserves the file's line endings. A file is
-   written only when every hunk in it validated.
+1. Find the work tree and list unmerged paths (`git ls-files -u`, `git diff --diff-filter=U`), NUL-separated.
+2. Parse `<<<<<<<`, an optional `|||||||` base, `=======`, and `>>>>>>>`.
+3. POST each hunk to `{base}/systemone` with `model`, `state` (file, language, both sides, optional base, context), and a `resolution` choice of `ours`, `theirs`, `both`, or `needs_code`. The body has no `messages`, `temperature`, or `response_format`.
+4. `ours`, `theirs`, or `both` at or above `--min-confidence` is applied in Rust: that side unchanged, or for `both` every OURS line then every THEIRS line. One identical seam line is kept once; other duplicates stay. Markers, empty output, or garbage reject the hunk and skip escalation.
+5. Other hunks go to `{base}/chat/completions` on `--code-model`: `needs_code`, `low_confidence`, `unknown_choice`, `decision_error` (non-auth 4xx, 5xx after retries, timeout, or a malformed body), or `too_large`. The decision budget is 32,768 tokens. Context is dropped from the outside in; if the sides still do not fit, the decision call is skipped.
+6. 401/403 abort the run (exit 2). 429, 5xx, and timeouts retry with jittered backoff and honor `Retry-After`. Up to `--concurrency` hunks run at once; a hunk may call both APIs.
+7. `--apply` writes with a temp file and rename, keeps the file's line endings, and writes a file only when every hunk in it validated.
 
 ## GitHub Actions
 
-`--ci`, or `GITHUB_ACTIONS=true`, turns on CI mode: no color, non-interactive,
-`::error` / `::warning` workflow annotations (file + line), and a Markdown job
-summary appended to `$GITHUB_STEP_SUMMARY`. Exit codes stay 0 / 1 / 2.
+`--ci`, or `GITHUB_ACTIONS=true`, turns off color, emits `::error` / `::warning` annotations, and appends a Markdown summary to `$GITHUB_STEP_SUMMARY`. Exit codes stay 0 / 1 / 2.
 
-A composite action lives at the repository root (`action.yml`). Copy
-[`examples/truce-pr.yml`](examples/truce-pr.yml) into a consuming repo's
-`.github/workflows/` — that file is an example only and is not active here.
+The composite action is `action.yml`. Copy [`examples/truce-pr.yml`](examples/truce-pr.yml) into the consuming repo; that example is not active here.
 
 ```yaml
 - uses: AJFrio/Truce@v1
   with:
     openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
-    mode: report          # or commit
-    # model: liquid/d1-ultra
-    # code-model: "~deepseek/deepseek-flash-latest"
-    # min-confidence: "0.7"
-    # target-branch: main
+    mode: report   # or commit
 ```
 
 | Input | Default | Notes |
 | --- | --- | --- |
-| `openrouter-api-key` | required | Pass `secrets.OPENROUTER_API_KEY`. Never echoed. |
-| `mode` | `report` | `report` previews; `commit` applies, stages, commits, and pushes a `truce/resolve-*` branch **only when every conflict resolved** (truce exit 0). A clean merge exits 0 without pushing. Unresolved hunks skip commit/push and keep truce's exit code. |
-| `model` | config / `liquid/d1-ultra` | System One decision model id. |
-| `code-model` | config / `~deepseek/deepseek-flash-latest` | Chat model for `needs_code`, low confidence, decision errors, and oversize hunks. |
-| `min-confidence` | `0.7` | Escalate a side choice below this confidence. |
+| `openrouter-api-key` | required | `secrets.OPENROUTER_API_KEY`. Never echoed. |
+| `mode` | `report` | `report` previews. `commit` applies, stages, commits, and pushes a `truce/resolve-*` branch only when every conflict resolved (exit 0). A clean merge exits 0 and does not push. Unresolved hunks skip commit and push. |
+| `model` | `liquid/d1-ultra` | System One decision model. |
+| `code-model` | `~deepseek/deepseek-flash-latest` | Chat model for escalation. |
+| `min-confidence` | `0.7` | Escalate a side choice below this. |
 | `target-branch` | `github.base_ref` | Branch merged into the PR head before Truce runs. |
-| `github-token` | `github.token` | Checkout (and push in commit mode). |
+| `github-token` | `github.token` | Checkout, and push in commit mode. |
 
-Store the OpenRouter key as the repository secret `OPENROUTER_API_KEY`. Do not
-put it in logs, `echo`, or workflow `run:` argv. Report mode needs
-`contents: read`. Commit mode needs `contents: write` so the default token can
-push.
-
-This repository's own CI (`.github/workflows/ci.yml`) runs `cargo fmt`,
-`clippy -D warnings`, and `cargo test` on Ubuntu, macOS, and Windows. A
-release workflow (`.github/workflows/release.yml`) builds tagged `v*` releases
-for linux x86_64/aarch64, macOS arm64/x86_64, and Windows x86_64, and attaches
-SHA-256 checksums.
+Store the key as the repository secret `OPENROUTER_API_KEY`. Report mode needs `contents: read`. Commit mode needs `contents: write`.
