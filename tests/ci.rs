@@ -59,7 +59,10 @@ fn script_cmd(dir: &Path) -> Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("TRUCE_SKIP_FETCH", "1")
         .env("TRUCE_SKIP_PUSH", "1")
-        .env_remove("OPENROUTER_API_KEY");
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("TRUCE_MODEL")
+        .env_remove("TRUCE_CODE_MODEL")
+        .env_remove("TRUCE_MIN_CONFIDENCE");
     cmd
 }
 
@@ -393,4 +396,33 @@ async fn action_script_unresolved_skips_commit_and_push() {
     );
     let body = fs::read_to_string(dir.path().join("letter.txt")).unwrap();
     assert!(body.contains("<<<<<<<"), "{body}");
+}
+
+#[cfg(unix)]
+#[test]
+fn action_script_passes_code_model_and_min_confidence() {
+    let dir = two_branch_repo();
+    let bin = assert_cmd::cargo::cargo_bin("truce");
+    let output = script_cmd(dir.path())
+        .env("TRUCE_BIN", &bin)
+        .env("TRUCE_MODE", "report")
+        .env("TRUCE_SKIP_MERGE", "1")
+        .env("TRUCE_MODEL", "custom/decision")
+        .env("TRUCE_CODE_MODEL", "custom/code")
+        .env("TRUCE_MIN_CONFIDENCE", "0.50")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("decision_model=custom/decision"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("code_model=custom/code"), "{stdout}");
+    assert!(stdout.contains("min_confidence=0.50"), "{stdout}");
 }

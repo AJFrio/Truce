@@ -1,20 +1,20 @@
-//! OpenRouter chat-completions client for hunk resolution.
+//! OpenRouter chat-completions client for code-generation escalation.
+//!
+//! Decision models are called from [`crate::systemone`]. This module still
+//! asks a chat model for replacement text when a hunk cannot be resolved
+//! from a System One choice alone.
 
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-
-use reqwest::header::{HeaderMap, RETRY_AFTER};
-use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 
 use crate::config::Settings;
 use crate::error::{Result, TruceError};
-use crate::output::{FileScan, FileStatus};
 use crate::parse::Hunk;
 use crate::resolve::{validate_resolution, Choice, HunkOutcome, Resolution};
+use crate::transport::{self, Transport};
+
+pub use crate::parse::language_of;
+pub use transport::redact;
 
 const JSON_SCHEMA: &str = r#"{
   "type": "object",
@@ -41,59 +41,37 @@ const JSON_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
-struct Inner {
-    http: reqwest::Client,
-    api_key: String,
-    base_url: String,
-    model: String,
-    timeout: Duration,
-    retries: u32,
-}
-
-/// HTTP client. The API key is never shown in Debug output.
+/// HTTP client for `{base_url}/chat/completions`. The API key is never shown
+/// in `Debug` output.
 #[derive(Clone)]
 pub struct OpenRouterClient {
-    inner: Arc<Inner>,
+    transport: Transport,
+    model: String,
 }
 
 impl std::fmt::Debug for OpenRouterClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenRouterClient")
-            .field("base_url", &self.inner.base_url)
-            .field("model", &self.inner.model)
-            .field("api_key", &"***")
+            .field("model", &self.model)
+            .field("transport", &self.transport)
             .finish()
     }
 }
 
 impl OpenRouterClient {
     pub fn new(settings: &Settings) -> Result<Self> {
-        let api_key = settings.api_key.clone().ok_or(TruceError::MissingApiKey)?;
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .map_err(|err| TruceError::OpenRouter(redact(&err.to_string(), &api_key)))?;
-        Ok(Self {
-            inner: Arc::new(Inner {
-                http,
-                api_key,
-                base_url: settings.base_url.trim_end_matches('/').to_string(),
-                model: settings.model.clone(),
-                timeout: settings.timeout,
-                retries: settings.retries,
-            }),
-        })
+        let transport = Transport::new(settings)?;
+        Ok(Self::from_parts(transport, settings.code_model.clone()))
     }
 
-    fn url(&self) -> String {
-        format!("{}/chat/completions", self.inner.base_url)
+    pub(crate) fn from_parts(transport: Transport, model: String) -> Self {
+        Self { transport, model }
     }
 
-    fn redact_err(&self, text: impl AsRef<str>) -> String {
-        redact(text.as_ref(), &self.inner.api_key)
-    }
-
-    /// Resolve one hunk. Auth failures are fatal; everything else is a rejection.
+    /// Resolve one hunk with the code model.
+    ///
+    /// Auth failures are fatal. Every other failure is a rejection so one
+    /// bad hunk does not abort the rest of the run.
     pub async fn resolve_hunk(
         &self,
         path: &str,
@@ -112,64 +90,10 @@ impl OpenRouterClient {
     }
 
     async fn complete(&self, path: &str, hunk: &Hunk) -> Result<String> {
-        let body = chat_body(&self.inner.model, path, hunk);
-        let mut last = String::from("OpenRouter request failed");
-        let attempts = self.inner.retries.saturating_add(1);
-
-        for attempt in 0..attempts {
-            let send = self
-                .inner
-                .http
-                .post(self.url())
-                .bearer_auth(&self.inner.api_key)
-                .header("HTTP-Referer", "https://github.com/AJFrio/Truce")
-                .header("X-Title", "Truce")
-                .json(&body)
-                .send();
-
-            let response = match tokio::time::timeout(self.inner.timeout, send).await {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(err)) => {
-                    last = self.redact_err(err.to_string());
-                    if err.is_timeout() || err.is_connect() || err.is_request() {
-                        sleep_backoff(attempt, None).await;
-                        continue;
-                    }
-                    return Err(TruceError::OpenRouter(last));
-                }
-                Err(_) => {
-                    last = format!("request timed out after {:?}", self.inner.timeout);
-                    sleep_backoff(attempt, None).await;
-                    continue;
-                }
-            };
-
-            let status = response.status();
-            let headers = response.headers().clone();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|err| self.redact_err(err.to_string()));
-            let text = self.redact_err(text);
-
-            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                return Err(TruceError::OpenRouterAuth);
-            }
-
-            if status.as_u16() == 429 || status.is_server_error() {
-                last = format!("HTTP {status}: {text}");
-                sleep_backoff(attempt, retry_after(&headers)).await;
-                continue;
-            }
-
-            if !status.is_success() {
-                return Err(TruceError::OpenRouter(format!("HTTP {status}: {text}")));
-            }
-
-            return extract_content(&text).map_err(|e| TruceError::OpenRouter(self.redact_err(e)));
-        }
-
-        Err(TruceError::OpenRouter(format!("retries exhausted: {last}")))
+        let body = chat_body(&self.model, path, hunk);
+        let text = self.transport.post_json("chat/completions", &body).await?;
+        extract_content(&text)
+            .map_err(|err| TruceError::OpenRouter(self.transport.redact_text(&err)))
     }
 }
 
@@ -202,38 +126,6 @@ fn chat_body(model: &str, path: &str, hunk: &Hunk) -> Value {
             }
         }
     })
-}
-
-pub fn language_of(path: &str) -> &'static str {
-    match Path::new(path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("rs") => "rust",
-        Some("py") => "python",
-        Some("js" | "mjs" | "cjs" | "jsx") => "javascript",
-        Some("ts" | "tsx") => "typescript",
-        Some("go") => "go",
-        Some("java") => "java",
-        Some("kt" | "kts") => "kotlin",
-        Some("c" | "h") => "c",
-        Some("cc" | "cpp" | "cxx" | "hpp" | "hh") => "cpp",
-        Some("cs") => "csharp",
-        Some("rb") => "ruby",
-        Some("php") => "php",
-        Some("swift") => "swift",
-        Some("md") => "markdown",
-        Some("toml") => "toml",
-        Some("yaml" | "yml") => "yaml",
-        Some("json") => "json",
-        Some("html" | "htm") => "html",
-        Some("css") => "css",
-        Some("sh" | "bash" | "zsh") => "shell",
-        Some("sql") => "sql",
-        _ => "text",
-    }
 }
 
 fn user_prompt(path: &str, hunk: &Hunk) -> String {
@@ -427,109 +319,12 @@ fn extract_object(s: &str) -> Option<&str> {
     }
 }
 
-/// Replace every occurrence of `key` (and `Bearer {key}`) in `text`.
-pub fn redact(text: &str, key: &str) -> String {
-    if key.is_empty() {
-        return text.to_string();
-    }
-    text.replace(key, "***")
-}
-
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let raw = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
-    raw.parse::<u64>()
-        .ok()
-        .map(|secs| Duration::from_secs(secs.min(60)))
-}
-
-async fn sleep_backoff(attempt: u32, retry_after: Option<Duration>) {
-    if let Some(d) = retry_after {
-        if !d.is_zero() {
-            tokio::time::sleep(d).await;
-        }
-        return;
-    }
-    let base_ms = 200u64.saturating_mul(1u64 << attempt.min(5));
-    let jitter = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as u64)
-            .unwrap_or(0);
-        nanos % 200
-    };
-    let delay = Duration::from_millis((base_ms + jitter).min(8_000));
-    tokio::time::sleep(delay).await;
-}
-
-/// Fill `outcomes` for every conflicted hunk, with a concurrency limit.
-pub async fn resolve_scans(
-    scans: &mut [FileScan],
-    client: &OpenRouterClient,
-    concurrency: usize,
-    min_confidence: f64,
-) -> Result<()> {
-    struct Job {
-        file: usize,
-        hunk: usize,
-        path: String,
-        hunk_data: Hunk,
-    }
-
-    let mut jobs = Vec::new();
-    for (file, scan) in scans.iter().enumerate() {
-        if scan.status != FileStatus::Conflicted {
-            continue;
-        }
-        let path = scan.rel_path.to_string_lossy().replace('\\', "/");
-        for (hunk_idx, hunk) in scan.hunks.iter().enumerate() {
-            jobs.push(Job {
-                file,
-                hunk: hunk_idx,
-                path: path.clone(),
-                hunk_data: hunk.clone(),
-            });
-        }
-    }
-    if jobs.is_empty() {
-        return Ok(());
-    }
-
-    let sem = Arc::new(Semaphore::new(concurrency.max(1)));
-    let mut set = tokio::task::JoinSet::new();
-    for job in jobs {
-        let client = client.clone();
-        let sem = sem.clone();
-        set.spawn(async move {
-            let _permit = sem.acquire_owned().await.expect("semaphore");
-            let outcome = client
-                .resolve_hunk(&job.path, &job.hunk_data, min_confidence)
-                .await;
-            (job.file, job.hunk, outcome)
-        });
-    }
-
-    while let Some(joined) = set.join_next().await {
-        let (file, hunk, outcome) =
-            joined.map_err(|err| TruceError::OpenRouter(format!("worker task failed: {err}")))?;
-        match outcome {
-            Ok(result) => {
-                if let Some(scan) = scans.get_mut(file) {
-                    if let Some(slot) = scan.outcomes.get_mut(hunk) {
-                        *slot = result;
-                    }
-                }
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Settings;
     use crate::parse::parse_conflicts;
+    use std::time::Duration;
 
     fn hunk() -> Hunk {
         parse_conflicts("<<<<<<< A\n1\n=======\n2\n>>>>>>> B\n", 0)
@@ -552,8 +347,8 @@ mod tests {
         assert!(p.contains("Language: rust"));
         assert!(p.contains("OURS"));
         assert!(p.contains("THEIRS"));
-        assert!(p.contains("1"));
-        assert!(p.contains("2"));
+        assert!(p.contains('1'));
+        assert!(p.contains('2'));
     }
 
     #[test]
@@ -588,6 +383,7 @@ mod tests {
     fn debug_hides_key() {
         let settings = Settings {
             model: "m".into(),
+            code_model: "code".into(),
             min_confidence: 0.7,
             concurrency: 1,
             timeout: Duration::from_secs(5),

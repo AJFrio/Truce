@@ -55,6 +55,11 @@ pub enum TruceError {
     #[error("OpenRouter request failed: {0}")]
     OpenRouter(String),
 
+    /// Non-auth failure from `POST /systemone` (HTTP error or malformed body).
+    /// Callers escalate these per hunk; they are not a process-level failure.
+    #[error("decision API request failed: {0}")]
+    Decision(String),
+
     #[error("invalid configuration: {0}")]
     Config(String),
 }

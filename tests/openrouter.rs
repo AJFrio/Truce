@@ -328,8 +328,11 @@ async fn prompt_mentions_language() {
         .code(0);
 
     let requests = server.received_requests().await.unwrap();
-    assert!(!requests.is_empty());
-    let body = std::str::from_utf8(&requests[0].body).unwrap();
+    let chat = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/chat/completions"))
+        .expect("code model request");
+    let body = std::str::from_utf8(&chat.body).unwrap();
     assert!(body.contains("Language: text"), "{body}");
     assert!(body.contains("File: letter.txt"), "{body}");
     assert!(!body.contains(KEY), "API key leaked into request body");

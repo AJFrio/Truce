@@ -309,6 +309,39 @@ fn collect_hunks(lines: &[String]) -> std::result::Result<Vec<HunkBody>, String>
     }
 }
 
+/// Best-effort language name from a repository-relative path.
+pub fn language_of(path: &str) -> &'static str {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("js" | "mjs" | "cjs" | "jsx") => "javascript",
+        Some("ts" | "tsx") => "typescript",
+        Some("go") => "go",
+        Some("java") => "java",
+        Some("kt" | "kts") => "kotlin",
+        Some("c" | "h") => "c",
+        Some("cc" | "cpp" | "cxx" | "hpp" | "hh") => "cpp",
+        Some("cs") => "csharp",
+        Some("rb") => "ruby",
+        Some("php") => "php",
+        Some("swift") => "swift",
+        Some("md") => "markdown",
+        Some("toml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("json") => "json",
+        Some("html" | "htm") => "html",
+        Some("css") => "css",
+        Some("sh" | "bash" | "zsh") => "shell",
+        Some("sql") => "sql",
+        _ => "text",
+    }
+}
+
 /// Join lines back into a file body, preserving EOL style and the original
 /// trailing-newline policy.
 pub fn join_lines(lines: &[String], line_ending: LineEnding, trailing_newline: bool) -> String {
