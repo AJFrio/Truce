@@ -23,6 +23,9 @@ those files. Binary and non-UTF-8 files are skipped and reported, never rewritte
 `truce sync` fetches a base branch (default origin/main), merges it into the \
 current branch, resolves conflicts, and commits. It pushes only with --push. \
 See `truce sync --help` for abort rules and exit codes.\n\n\
+`truce update` compares this binary with the latest GitHub Release of \
+AJFrio/Truce and replaces it when a newer version exists. `--check` prints \
+the result without downloading. See `truce update --help`.\n\n\
 Model selection for the decision model: --model, then TRUCE_MODEL, then \
 .truce.toml in the repo root, then $XDG_CONFIG_HOME/truce/config.toml, then \
 liquid/d1-ultra. That model is called via OpenRouter System One \
@@ -105,6 +108,8 @@ pub struct Cli {
 pub enum Command {
     /// Fetch the base, merge or rebase it into HEAD, and resolve conflicts.
     Sync(SyncArgs),
+    /// Download and install a GitHub Release of this binary.
+    Update(UpdateArgs),
 }
 
 /// Flags for `truce sync`.
@@ -223,6 +228,34 @@ pub struct ModelArgs {
     pub base_url: Option<String>,
 }
 
+/// Flags for `truce update`.
+///
+/// With no flags, the command installs the latest GitHub Release when it is
+/// newer than this binary. The archive checksum is verified before the
+/// running binary is replaced.
+#[derive(Debug, Args)]
+#[command(after_help = "Exit codes:\n  \
+0  Already up to date, --check printed the result, or the binary was replaced\n  \
+2  The release could not be downloaded, verified, or installed\n\n\
+When this binary is already the latest release, or already the tag passed to \
+--version, truce prints a message and exits 0 without downloading.\n\n\
+A newer release is chosen from the published assets: linux x64, linux arm64, \
+macOS arm64, macOS x64, and windows x64. The archive is checked against \
+SHA256SUMS before it is extracted. The running binary is replaced only after \
+that check. On Windows the running .exe is renamed aside and the new .exe \
+takes its place.\n\n\
+If the install directory is not writable, the command exits 2 and tells you \
+to re-run with sudo (or an elevated terminal on Windows).")]
+pub struct UpdateArgs {
+    /// Check for an update and print the result. Do not download or install.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Install this release tag instead of the latest (for example v0.2.0).
+    #[arg(long, value_name = "TAG")]
+    pub version: Option<String>,
+}
+
 impl SyncArgs {
     /// `--ci` or `GITHUB_ACTIONS=true`.
     pub fn ci_mode(&self) -> bool {
@@ -267,6 +300,34 @@ mod tests {
         assert!(help.contains("--ci"), "{help}");
         assert!(help.contains("GITHUB_ACTIONS"), "{help}");
         assert!(help.contains("sync"), "{help}");
+        assert!(help.contains("update"), "{help}");
+        assert!(help.contains("truce update"), "{help}");
+    }
+
+    #[test]
+    fn update_subcommand_parses_check_and_version() {
+        let cli = Cli::parse_from(["truce", "update", "--check", "--version", "v1.2.3"]);
+        let Some(Command::Update(args)) = cli.command else {
+            panic!("expected update");
+        };
+        assert!(args.check);
+        assert_eq!(args.version.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn update_help_documents_check_checksum_and_permissions() {
+        let mut cmd = Cli::command();
+        let update = cmd
+            .find_subcommand_mut("update")
+            .expect("update subcommand");
+        let mut buf = Vec::new();
+        update.write_long_help(&mut buf).unwrap();
+        let help = String::from_utf8(buf).unwrap();
+        assert!(help.contains("--check"), "{help}");
+        assert!(help.contains("--version"), "{help}");
+        assert!(help.contains("SHA256SUMS"), "{help}");
+        assert!(help.contains("sudo"), "{help}");
+        assert!(help.contains("without downloading"), "{help}");
     }
 
     #[test]

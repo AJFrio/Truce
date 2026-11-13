@@ -18,6 +18,11 @@ serde_json = "1.0.133"
 thiserror = "2.0.3"
 tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 toml = "0.8.19"
+flate2 = "1.0.35"
+semver = "1.0.26"
+sha2 = "0.10.8"
+tar = "0.4.43"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 assert_cmd = "~2.0.16"

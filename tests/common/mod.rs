@@ -85,7 +85,9 @@ pub fn truce(dir: &Path) -> Truce {
         )
         .env_remove("GITHUB_ACTIONS")
         .env_remove("GITHUB_STEP_SUMMARY")
-        .env_remove("GITHUB_BASE_REF");
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("TRUCE_UPDATE_API")
+        .env_remove("TRUCE_UPDATE_TARGET");
     cmd
 }
 

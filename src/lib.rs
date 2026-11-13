@@ -14,6 +14,7 @@ pub mod output;
 pub mod parse;
 pub mod resolve;
 mod sync;
+mod update;
 
 use std::fs;
 use std::io::ErrorKind;
@@ -33,6 +34,7 @@ pub async fn run(mut cli: Cli) -> Result<i32> {
     if let Some(command) = cli.command.take() {
         return match command {
             cli::Command::Sync(args) => sync::run(args).await,
+            cli::Command::Update(args) => update::run(args).await,
         };
     }
     run_resolve(cli).await

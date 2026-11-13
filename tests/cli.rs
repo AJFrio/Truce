@@ -23,7 +23,8 @@ fn help_lists_exit_codes() {
         .stdout(predicate::str::contains("--code-model"))
         .stdout(predicate::str::contains("liquid/d1-ultra"))
         .stdout(predicate::str::contains("--stage"))
-        .stdout(predicate::str::contains("--ci"));
+        .stdout(predicate::str::contains("--ci"))
+        .stdout(predicate::str::contains("update"));
 }
 
 #[test]
