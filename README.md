@@ -11,7 +11,7 @@ cargo install --path .   # from a clone
 cargo install --git https://github.com/AJFrio/Truce --locked
 ```
 
-Requires Rust 1.80+ (`rust-version` in `Cargo.toml`) and `git` on `PATH`. Prebuilt Linux, macOS, and Windows binaries are on [GitHub Releases](https://github.com/AJFrio/Truce/releases), with checksums in `SHA256SUMS`.
+Requires Rust 1.80+ (`rust-version` in `Cargo.toml`) and `git` on `PATH`. Prebuilt Linux, macOS, and Windows binaries are on [GitHub Releases](https://github.com/AJFrio/Truce/releases), with checksums in `SHA256SUMS`. An installed binary can update itself with `truce update`.
 
 ## Usage
 
@@ -29,6 +29,10 @@ truce sync                       # fetch origin/main, merge, resolve, commit
 truce sync --push                # also push (never a force-push)
 truce sync --rebase              # experimental per-commit rebase
 truce sync --verify-cmd "cargo test"
+
+truce update                     # install the latest release when it is newer
+truce update --check             # report only; do not download
+truce update --version v0.2.0    # install that tag
 ```
 
 Run during a merge, rebase, cherry-pick, or revert. `--dry-run` is the default: with a key, the model runs and files stay unchanged. A file is rewritten only when every hunk in it resolved. `git add` runs only with `--stage`. With no key, `truce` lists hunks and skips the model; `--apply` then exits 2.
@@ -57,6 +61,30 @@ truce [OPTIONS] [PATH]...
 Color is on when stdout is a TTY, and off with `--no-color`, `--ci`, `GITHUB_ACTIONS=true`, `NO_COLOR`, or `TERM=dumb`. Status words (`OURS`, `THEIRS`, `BASE`, `CONFLICTED`, `SKIPPED`, `RESOLVED`, `REJECTED`) are always printed.
 
 Binary and non-UTF-8 files are skipped and left unchanged. Malformed markers are parse errors. A rejected hunk — leftover markers, empty or garbage output, or code-model confidence below `--min-confidence` — stays unresolved, including when a confident decision fails those checks.
+
+## Update
+
+`truce update` compares this binary's version (`truce --version`) with the latest [GitHub Release](https://github.com/AJFrio/Truce/releases) of `AJFrio/Truce`. When a newer release exists, it downloads the archive for this machine, checks it against `SHA256SUMS`, and replaces the running binary. The checksum is verified before anything is extracted or replaced.
+
+```bash
+truce update
+truce update --check
+truce update --version v0.2.0
+```
+
+| This machine | Archive |
+| --- | --- |
+| Linux x86_64 | `truce-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `truce-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS arm64 | `truce-aarch64-apple-darwin.tar.gz` |
+| macOS x64 | `truce-x86_64-apple-darwin.tar.gz` |
+| Windows x64 | `truce-x86_64-pc-windows-msvc.zip` |
+
+If this binary is already that version, the command prints `truce <version> is up to date` and exits 0 without downloading. `--check` prints whether a newer release exists and does not download. `--version <tag>` selects that release instead of the latest; a tag of `0.2.0` is read as `v0.2.0`.
+
+A checksum mismatch or an archive without the `truce` binary leaves the installed binary in place and exits 2. If the install directory is not writable, the error says to re-run with `sudo truce update` (on Windows, from an elevated terminal). On Windows the running `.exe` is renamed aside and the new `.exe` takes its name; the previous file is removed when the system allows it.
+
+`TRUCE_UPDATE_API` overrides the GitHub API base (default `https://api.github.com`) for a proxy or tests.
 
 ## Configuration
 
